@@ -1,13 +1,12 @@
-
 import { Money } from './money.js';
 
-export type AuthorizationHoldStatus = 'ACTIVE' | 'SETTLED' | 'RELEASED';
+export type SettlementStatus = 'SETTLED' | 'REJECTED';
 
-export interface AuthorizationHold {
+export interface Settlement {
+  readonly settlementId: string;
   readonly authorizationId: string;
   readonly accountId: string;
   readonly amount: Money;
   readonly valueDate: string;
-   status: AuthorizationHoldStatus;
+  readonly status: SettlementStatus;
 }
-
