@@ -46,7 +46,9 @@ Each entry knows which day it counts for, but not which day it arrived.
 
 **Why:** "A hold reduces available balance but not ledger balance." If holds aren't in the ledger, that's true automatically.
 
-**Cost:** a hold's status is changed in place (ACTIVE → SETTLED), so authorizations don't have the same append-only history as money. That's also why the report has to snapshot states at each close. A list of hold events (approved, settled, released) would fix both.
+A hold can end three ways: SETTLED by a settlement, RELEASED by a release event, or DECLINED at the start. Authorizing is idempotent on the authorization ID, so a retransmitted request can't reserve money twice.
+
+**Cost:** a hold's status is changed in place (ACTIVE → SETTLED or RELEASED), so authorizations don't have the same append-only history as money. That's also why the report has to snapshot states at each close. A list of hold events (approved, settled, released) would fix both.
 
 ## 4. Fees: check every day, every close
 

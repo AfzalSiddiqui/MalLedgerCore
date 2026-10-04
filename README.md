@@ -8,8 +8,8 @@ There's no database, API or UI. That was the brief, and it keeps the interesting
 
 - Keeps an append-only list of ledger entries. Nothing is ever edited or deleted.
 - Tracks two dates for every event: the day it arrived and the day it counts for (its value date).
-- Handles card authorization holds, which reduce available balance but not the ledger balance.
-- Settles authorizations, and rejects settlements it can't match.
+- Handles card authorization holds, which reduce available balance but not the ledger balance. A repeated authorization ID gets the original decision, not a second hold.
+- Settles authorizations, releases them (cancellation, reversal or expiry), and rejects settlements it can't match.
 - Reverses entries by adding an opposite entry, never by removing the original.
 - Charges a daily overdraft fee when a day closes negative.
 - Accrues daily interest and pays it as a single credit on the last day.

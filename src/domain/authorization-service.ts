@@ -28,6 +28,14 @@ export class AuthorizationService {
       throw new Error('Authorization amount must be positive');
     }
 
+    // Idempotent on authorization ID: a retransmitted request gets the
+    // original decision back and never reserves funds a second time.
+    const existing = this.find(account.id, authorizationId);
+
+    if (existing) {
+      return existing;
+    }
+
     const available = this.availableBalance(account, valueDate);
 
     const status: AuthorizationHoldStatus =
@@ -62,6 +70,41 @@ export class AuthorizationService {
       );
 
     return ledgerBalance.subtract(activeHolds);
+  }
+
+  /**
+   * Ends an ACTIVE hold without a settlement: a merchant cancellation, a
+   * terminal-timeout reversal, or expiry. The reserved funds become available
+   * again immediately. Only an ACTIVE hold can be released.
+   */
+  release(
+    account: Account,
+    authorizationId: string,
+  ): 'RELEASED' | 'UNKNOWN_AUTHORIZATION' | 'AUTHORIZATION_NOT_ACTIVE' {
+    const hold = this.find(account.id, authorizationId);
+
+    if (!hold) {
+      return 'UNKNOWN_AUTHORIZATION';
+    }
+
+    if (hold.status !== 'ACTIVE') {
+      return 'AUTHORIZATION_NOT_ACTIVE';
+    }
+
+    hold.status = 'RELEASED';
+
+    return 'RELEASED';
+  }
+
+  find(
+    accountId: string,
+    authorizationId: string,
+  ): AuthorizationHold | undefined {
+    return this.holds.find(
+      (hold) =>
+        hold.accountId === accountId &&
+        hold.authorizationId === authorizationId,
+    );
   }
 
   holdsFor(accountId: string): readonly AuthorizationHold[] {

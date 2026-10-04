@@ -225,6 +225,21 @@ export class LedgerReplay {
       }
 
       case 'AUTHORIZATION': {
+        const existing = this.authorizationService.find(
+          account.id,
+          event.authorizationId,
+        );
+
+        if (existing) {
+          errors.push({
+            eventId: event.eventId,
+            day: event.day,
+            message: `WARNING (ignored): duplicate authorization ${event.authorizationId}; original decision ${existing.status} kept, no second hold`,
+          });
+
+          return;
+        }
+
         const hold = this.authorizationService.authorize(
           account,
           event.authorizationId,
@@ -281,6 +296,27 @@ export class LedgerReplay {
             eventId: event.eventId,
             day: event.day,
             message: `Reversal ${event.eventId} rejected: original entry ${event.originalEntryId} not found or already reversed`,
+          });
+        }
+
+        return;
+      }
+
+      case 'AUTHORIZATION_RELEASE': {
+        const outcome = this.authorizationService.release(
+          account,
+          event.authorizationId,
+        );
+
+        if (outcome !== 'RELEASED') {
+          errors.push({
+            eventId: event.eventId,
+            day: event.day,
+            message: `Release of ${event.authorizationId} ignored: ${
+              outcome === 'UNKNOWN_AUTHORIZATION'
+                ? 'authorization does not exist'
+                : 'authorization is not active'
+            }`,
           });
         }
 

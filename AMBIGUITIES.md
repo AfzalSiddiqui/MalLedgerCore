@@ -127,8 +127,14 @@ The brief doesn't say what to do with a duplicate.
 
 ## Declined vs released
 
-A declined authorization never held any money, so it's marked DECLINED. RELEASED is kept for holds that were active and then given back. Mixing the two up would confuse an audit.
+A declined authorization never held any money, so it's marked DECLINED. RELEASED is for holds that were active and then given back. An `AUTHORIZATION_RELEASE` event does that, covering a merchant cancellation, a terminal-timeout reversal or expiry. Only an ACTIVE hold can be released, and a released hold can't be settled. Mixing DECLINED and RELEASED up would confuse an audit.
+
+## The same authorization ID twice
+
+The brief doesn't cover a repeated authorization request, which is what a network retransmission looks like.
+
+**Decision:** authorization is idempotent on its ID. The second request gets the original decision back, reserves nothing and is reported as `WARNING (ignored)`. Before this fix, it created a second hold and reserved the money twice.
 
 ## The authorization lifecycle
 
-This stream only uses approve and settle. A real system would also need expiry, cancellation, release and partial capture.
+This stream only uses approve and settle. The model also supports release. A real system would still need automatic expiry timers, multiple partial captures, over-capture tolerance and refunds linked to the original settlement. The Part 2 architecture document goes through each way an authorization can end.

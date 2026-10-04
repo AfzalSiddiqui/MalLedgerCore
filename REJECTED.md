@@ -56,6 +56,13 @@ Even if I added a refund rule, the original fee entries would still be there, wi
 
 It's 10.002. Paying it out that way would create 0.002 BHD from nothing. The ledger pays 3.334 + 3.333 + 3.333 instead, which comes to exactly 10.000.
 
+## Criteria 1, 3, 4 and 5: why they're accepted
+
+- **1.** At the end of Day5, the entries counting for Day2 or earlier are E1, E2 and E7: 1200.00 − 950.00 − 620.00 = −370.00. Auth-A's hold isn't a ledger entry, and no fee has been booked yet, so the figure stands.
+- **3.** When E5 arrives, Auth-A is an ACTIVE hold of 200.00 on the same account, in the same currency. The 185.00 is positive and not above the hold, so it settles. 185.00 is debited and the hold is cleared. It isn't re-checked against available balance, because the hold already reserved that money.
+- **4.** Auth-Z was never authorized, so it's rejected with an error and nothing is posted. The caveat is that real card systems post these to a suspense account (AMBIGUITIES.md).
+- **5.** True as a rule. An approved hold lowers available balance only, and the tests prove it. In this stream, though, Auth-B is declined (−155.00 − 90.00 = −245.00), so there's no hold for the rule to apply to.
+
 ## Criterion 8: nothing gets discarded
 
 Throwing away a remainder leaves a gap in the books that nobody can explain. In this design there's never a remainder anyway, because the interest paid is defined as the sum of the rounded daily amounts.

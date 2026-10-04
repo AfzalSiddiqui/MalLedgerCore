@@ -92,3 +92,11 @@
 
 ### 18:25–18:30 +0400
 - Rewrote README, AMBIGUITIES, NUMBERS, REJECTED and ARCHITECTURE in plainer language, with AI help (Claude). The numbers and decisions are unchanged; only the wording is different.
+
+### 18:38–18:50 +0400
+- With AI help (Claude), closed two authorization gaps found while writing the Part 2 document:
+  - A repeated authorization ID used to create a second hold. Authorizing is now idempotent on the ID, and the replay flags the retry.
+  - RELEASED was declared but nothing could reach it. Added an `AUTHORIZATION_RELEASE` event and `AuthorizationService.release`.
+- Added `tests/authorization-lifecycle.test.ts` (5 tests). The suite is now 63 tests with exactly 1 intended failure. Replay output is unchanged.
+- Added the reasoning for criteria 1, 3, 4 and 5 to REJECTED.md, and updated AMBIGUITIES, README and ARCHITECTURE.
+- Measured how authorization cost grows with volume, for the Part 2 document. With 100 accounts: 1,000 authorize+settle pairs took 31 ms, 10,000 took 1.4 s and 30,000 took 12.5 s. Per-pair cost grows linearly with history, so total cost grows quadratically.
