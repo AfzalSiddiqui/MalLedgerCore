@@ -1,65 +1,68 @@
 # Worklog
 
-## Project setup
+## 2026-10-03
 
-- Established the TypeScript/Node.js project.
-- Added the domain model and test setup.
+### 18:47:54 +0400
+- Initialized the repository.
 
-## Ledger foundation
+### 19:14:36 +0400
+- Initialized the MalLedgerCore TypeScript project.
 
-- Added currency-aware money representation.
-- Added integer minor-unit calculations.
-- Added append-only ledger entries.
-- Added value-dated historical balance calculation.
+### 20:01:20 +0400
+- Implemented the value-dated append-only ledger foundation.
 
-## Authorization and settlement
+### 20:06:38 +0400
+- Merged the value-dated ledger foundation.
 
-- Added authorization holds and available balance.
-- Added settlement validation.
-- Rejected settlement against unknown authorization without creating a debit.
+## 2026-10-04
 
-## Reversal
+### 01:13:54 +0400
+- Added authorization holds and available-balance calculation.
 
-- Added append-only compensating reversals.
-- Original ledger entries remain immutable.
+### 01:15:50 +0400
+- Merged authorization hold integrity changes.
 
-## Fees
+### 01:24:45 +0400
+- Added settlement handling for authorization holds.
 
+### 01:29:26 +0400
+- Merged settlement handling changes.
+
+### 01:36:52 +0400
+- Added append-only reversal handling.
+
+### 01:38:59 +0400
+- Merged append-only reversal changes.
+
+### 01:46:34 +0400
 - Added daily overdraft fee assessment.
-- Fee assessment is limited to once per account/date.
 
-## Interest
+### 01:50:32 +0400
+- Merged daily overdraft fee changes.
 
-- Added 0.04% daily interest.
-- Added positive-balance-only calculation.
-- Added currency-aware half-up rounding.
-- Added end-of-period capitalization.
-- Added duplicate-capitalization protection.
+### 11:57:36 +0400
+- Added daily interest accrual and capitalization.
 
-## Event replay
+### 11:59:43 +0400
+- Merged daily interest accrual changes.
 
-- Added E1-E10 event model.
-- Added arrival-order replay with independent value dates.
-- Added late E7 processing.
-- Added E9 reversal.
-- Added exact BHD installment splitting.
-- Added daily reporting.
+### 12:04:23 +0400
+- Added E1–E10 event replay and daily ledger reporting.
 
-## Verification
+### 12:18:56 +0400
+- Documented ledger decisions, numbers, ambiguities, rejected criteria and assessment trade-offs.
 
-Current implementation:
+## Design Decisions
 
-35 tests passing.
-
-TypeScript build passing.
-
-## Important design decisions
-
-- Money is represented with integer minor units.
-- Value date is independent from arrival day.
-- Reversals append compensating entries.
-- Fees remain after later reversals.
+- Ledger entries are append-only.
+- Reversals use compensating entries instead of mutating existing entries.
+- Value dates are preserved independently from event arrival days.
+- Authorization holds reduce available balance but do not change ledger balance.
+- Unknown authorization settlements are rejected without debiting funds.
+- Overdraft fees are assessed once per account and assessed date.
+- Daily interest is calculated on positive closing balances only.
+- Monetary values use integer minor units with currency-specific precision.
 - Exact monetary conservation takes priority over equal rounded installments.
-- Rounded daily interest accruals are summed exactly.
-
-Exact commit timestamps are available in Git history and are intentionally not fabricated here.
+- BHD 10.000 is split as 3.334 + 3.333 + 3.333 to conserve the exact amount.
+- Rounded daily interest accruals are summed exactly before capitalization.
+- Fees remain after later reversals because the ledger is append-only.
