@@ -1,25 +1,27 @@
-# Rejected Criteria and Approaches
+# Rejected
 
-## Verdicts
+Two parts here: which acceptance criteria I didn't accept and why, and the approaches I tried or considered and then dropped.
+
+## The criteria at a glance
 
 | # | Criterion | Verdict |
 |---|---|---|
-| 1 | Day2 close at end of Day5, before fees = −370.00 | Accepted: 1200.00 − 950.00 − 620.00 |
+| 1 | Day2 closes at −370.00 at the end of Day5, before fees | Accepted: 1200.00 − 950.00 − 620.00 |
 | 2 | E7 causes exactly one fee, on Day2 | **Rejected** |
-| 3 | Auth-A Day4 settlement accepted | Accepted |
-| 4 | Unknown-auth settlement rejected, funds don't leave | Accepted with a qualification (see AMBIGUITIES.md) |
-| 5 | If Auth-B approved, hold hits available not ledger | Accepted, but it never applies: Auth-B is declined |
-| 6 | After E9, balances and fees return to pre-E7 | **Rejected** |
+| 3 | Auth-A's Day4 settlement is accepted | Accepted |
+| 4 | A settlement for an unknown authorization is rejected and no money leaves | Accepted, with a caveat (see AMBIGUITIES.md) |
+| 5 | If Auth-B is approved, its hold lowers available balance but not ledger balance | Accepted, though it never comes up: Auth-B is declined |
+| 6 | After E9, balances and fees go back to their pre-E7 values | **Rejected** |
 | 7 | Each BHD instalment is 3.334 | **Rejected** |
-| 8 | Accrual remainder is discarded | **Rejected** |
+| 8 | Any interest rounding remainder is discarded | **Rejected** |
 
-Criterion 5 is accepted even though it never fires, because it correctly describes how holds work. Criterion 8 is rejected even though it never fires either, because it tells the ledger to discard money, which the "must sum exactly" rule forbids.
+Criteria 5 and 8 both describe things that never happen in this stream, so why accept one and reject the other? Criterion 5 is a correct description of how holds work. Criterion 8 tells the ledger to throw money away, which breaks the "must add up exactly" rule. A rule that never fires is fine if it's right. It's still wrong if it would break another rule when it did fire.
 
-## Acceptance criterion 2
+## Criterion 2: E7 causes three fees, not one
 
-Rejected. E7 causes three fees, not one.
+Walking through the days after E7:
 
-| Value day | Balance before fee | Fee | Close |
+| Day | Balance before fee | Fee? | Close |
 |---|---:|---|---:|
 | Day1 | 250.00 | no | 250.00 |
 | Day2 | −370.00 | yes | −395.00 |
@@ -27,90 +29,75 @@ Rejected. E7 causes three fees, not one.
 | Day4 | −180.00 | yes | −205.00 |
 | Day5 | −205.00 | yes | −230.00 |
 
-Without E7, Day2, Day4 and Day5 close at 250.00, 465.00 and 465.00, so E7 causes all three fees.
+Without E7, Day2, Day4 and Day5 would close at 250.00, 465.00 and 465.00. So all three fees are down to E7.
 
-The criterion is wrong under the alternative model too. If only the closing day were assessed, E7 would cause one fee on Day5, not Day2.
+The criterion doesn't hold up under the simpler model either. If only the day being closed were checked, E7 would cause one fee, but on Day5, not Day2.
 
-The criterion could also be read as "Day2 is charged once, not twice". The implementation satisfies that reading, since the (account, date) key prevents a double charge. But the sentence is about what E7 causes, and E7 causes three fees.
+You could read it as "Day2 is only charged once", meaning no double charging. That part is true, because fees are tracked per account and day. But the sentence is about what E7 causes, and E7 causes three fees.
 
-## Acceptance criterion 6
+## Criterion 6: the fees don't disappear
 
-Rejected.
+E9 adds an entry that cancels E7. The three fees stay, though. That isn't because of append-only, since a refund would simply be new entries. It's because the brief doesn't give any refund rule.
 
-The fees are not refunded because the brief has no refund rule, not because of append-only. A refund would be appended as new entries.
+Final balances against pre-E7:
 
-E9 compensates E7 with a new entry and leaves both E7 and the three fees intact.
+| Day | Pre-E7 | After E9 |
+|---|---:|---:|
+| Day2 | 250.00 | 225.00 |
+| Day3 | 650.00 | 625.00 |
+| Day4 | 465.00 | 415.00 |
+| Day5 | 465.00 | 390.00 |
 
-Final balances compared with pre-E7: Day2 225.00 vs 250.00, Day3 625.00 vs 650.00, Day4 415.00 vs 465.00, Day5 390.00 vs 465.00. Interest falls from 1.03 to 0.93.
+Interest drops from 1.03 to 0.93.
 
-Even with a refund policy, the fee records would remain, with refund entries appended next to them. The cost of having no refund rule is shown by the deliberately failing test (`tests/known-gap.test.ts`).
+Even if I added a refund rule, the original fee entries would still be there, with refund entries next to them. The failing test (`tests/known-gap.test.ts`) puts a number on what having no refund rule costs.
 
-## Acceptance criterion 7
+## Criterion 7: 3 × 3.334 isn't 10.000
 
-Rejected.
+It's 10.002. Paying it out that way would create 0.002 BHD from nothing. The ledger pays 3.334 + 3.333 + 3.333 instead, which comes to exactly 10.000.
 
-Three BHD 3.334 installments equal BHD 10.002, not BHD 10.000.
+## Criterion 8: nothing gets discarded
 
-The implementation preserves exact monetary value.
+Throwing away a remainder leaves a gap in the books that nobody can explain. In this design there's never a remainder anyway, because the interest paid is defined as the sum of the rounded daily amounts.
 
-## Acceptance criterion 8
+# Approaches I dropped
 
-Rejected.
+## Only checking fees for days that had a debit
 
-Discarding a monetary remainder would create an unexplained accounting difference.
+This was my first version of the end-of-day fee check. For E7 it charged Day2 only. It missed Day4, and it missed Day5 even though Day5 was the very day being closed and it was negative. Now every day up to the one being closed is checked.
 
-The implementation preserves the exact sum of rounded daily interest accruals.
+## Closing a day twice when a late event arrives
 
-# Abandoned approaches
+The first replay loop closed Day6 when E10 (labelled Day5) came in, then closed Day5 again at the end. Now the clock only moves forward, and E10 is treated as a late arrival on Day6.
 
-## Assessing fees only for value dates touched by that day's debits
+## Showing final authorization states every day
 
-This was the first version of end-of-day fee assessment. It was dropped because it gave one fee (Day2) for E7, and missed Day5 even though Day5 was the day being closed and closed negative. Every date up to the closing day is now re-checked.
+That made Day2 show Auth-A as SETTLED before it had settled. States are now captured at each day's close.
 
-## Closing a day again for a late event
+## Using `it.fails` for the failing test
 
-The first replay loop closed Day6 when E10 (labelled Day5) arrived, then closed Day5 a second time at the end. Dropped: the clock now only moves forward, and E10 is a late arrival processed during Day6.
-
-## Reporting final authorization states on every day
-
-Dropped because Day2 showed Auth-A as SETTLED before it settled. States are now captured at each day's close.
-
-## `it.fails` as the failing test
-
-Dropped. `it.fails` passes when its body fails, so the suite had no failing test at all, and the test checked arithmetic rather than the design. It is replaced by a plain failing test against the design.
+I dropped this because `it.fails` passes when its body fails. So the suite had no failing test at all, and the test was only checking arithmetic, not my design. It's been replaced by a plain test that genuinely fails against the design.
 
 ## Floating-point money
 
-Rejected because binary floating point is unsuitable for exact financial amounts.
+Floating point can't represent amounts like 0.10 exactly, so I never used it.
 
-## Mutating entries during reversal
+## Editing entries to reverse them
 
-Rejected because it violates append-only auditability.
+That would break the audit trail. Reversals are new entries.
 
-## Treating authorization holds as ledger debits
+## Treating holds as ledger debits
 
-Rejected because a hold reserves available balance without posting a ledger transaction.
+A hold reserves money without moving it, so it belongs outside the ledger.
 
-## Posting unknown settlements to the customer account
+## Posting unknown settlements to the customer's account
 
-Rejected for this core: Auth-Z is refused, and nothing is posted to ACC-001. A production system would post it to a suspense account instead, because clearing records without an authorization (force posts, offline transactions) are normal and the money has usually already left the bank. See AMBIGUITIES.md.
+Not for this project: Auth-Z is rejected and nothing touches ACC-001. A real system would post it to a suspense account instead, because settlements without an authorization are normal in card processing and the money has usually already left the bank. See AMBIGUITIES.md.
 
-## Database
+## Things I didn't build
 
-Rejected for this assessment because the requirement explicitly calls for an in-memory implementation.
-
-## Kafka or distributed event infrastructure
-
-Rejected as unnecessary for the assessment scope.
-
-## HTTP API
-
-Rejected because the assessment evaluates the ledger core through tests/replay.
-
-## UI
-
-Rejected because it does not contribute to proving ledger correctness.
-
-## Generic rules engine
-
-Rejected because the supplied rules are small and explicit; a generic engine would add complexity without improving this implementation.
+- **A database:** the brief asks for in-memory.
+- **Kafka or other event infrastructure:** far more than this needs.
+- **An HTTP API:** the ledger is checked through tests and the replay script.
+- **A UI:** it wouldn't help prove the ledger is correct.
+- **A generic rules engine:** the rules are few and specific, and an engine would add complexity for nothing.

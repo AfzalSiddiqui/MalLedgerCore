@@ -1,74 +1,93 @@
 # Architecture
 
-## Shape
+## The big picture
 
 ```text
-SCENARIO_EVENTS (stream order)
+SCENARIO_EVENTS (in stream order)
         |
         v
-LedgerReplay.replay()            processing clock: Day1..Day6, only moves forward
-   |  for each event: close every day left behind, then process the event
-   |  late event (E10)? -> WARNING, processed on the open day, keeps its value date
+LedgerReplay.replay()            the clock runs Day1 to Day6 and never goes back
+   |  for each event: close any days we've moved past, then handle the event
+   |  late event (E10)? flag it, handle it today, keep its value date
    |
    +--> AppendOnlyLedger         money entries: CREDIT, DEBIT, FEE, INTEREST, REVERSAL
-   +--> AuthorizationService     holds: ACTIVE / DECLINED / SETTLED (not ledger entries)
-   +--> SettlementService        DEBIT entry + hold -> SETTLED
-   +--> ReversalService          compensating REVERSAL entry
+   +--> AuthorizationService     holds: ACTIVE / DECLINED / SETTLED (kept outside the ledger)
+   +--> SettlementService        posts a DEBIT and marks the hold SETTLED
+   +--> ReversalService          posts an opposite REVERSAL entry
    |
    +--> closeDay(day)
-          1. FeeService: re-check every value date Day1..day, ascending
-          2. last day only: InterestService accrues Day1..Day6 from final history, capitalizes the sum
-          3. snapshot: as-known closing balances, authorization states, fees booked
+          1. fees: check every value date from Day1 to today, oldest first
+          2. last day only: work out interest for every day, pay the total
+          3. snapshot balances, authorization states and fees for the report
         |
         v
 DailyReport[]  ->  src/run.ts prints it (npm run replay)
 ```
 
-## Decisions and trade-offs
+Below are the main decisions and what each one costs.
 
-### 1. Balances are computed from entries, never stored
-`balanceAt(account, valueDate)` sums the opening balance plus every entry with `valueDate <= valueDate`.
+## 1. Balances are worked out, not stored
 
-**Why:** a back-valued entry (E7: arrives Day5, value Day2) changes every closing balance from Day2 onward. A computed balance cannot go stale.
+`balanceAt(account, valueDate)` adds the opening balance to every entry with a value date on or before the date asked for.
 
-**Cost:** each query is O(entries). That is irrelevant at the 14 entries in this replay, but significant at bank scale. **At scale:** cache a balance per (account, value date) and invalidate it from the value date of any back-valued entry onward. The entries stay the source of truth.
+**Why:** a back-dated entry like E7 (arrives Day5, counts from Day2) changes every balance from Day2 onwards. A balance that's always recalculated can't go out of date.
 
-### 2. Value date on entries, but no posting date
-Entries carry `valueDate` only. The day each entry was learned about is not stored.
+**Cost:** every lookup goes through every entry. That's nothing with the 14 entries in this replay, but it would hurt at bank scale. At scale I'd cache a balance per account per day and throw the cache away from the value date of any back-dated entry onwards. The entries would stay the source of truth.
 
-**Why:** that keeps the entry model small.
+## 2. Entries have a value date but no arrival date
 
-**Cost:** an "as known on Day N" balance cannot be asked of the ledger later. The replay works around this by taking a snapshot at each day's close (`closingAsKnown`). Criterion 1 (Day2 close as known at end of Day5) has to be reconstructed by excluding E9 and fees by hand in the test. **Next improvement:** add `postedOn` to `LedgerEntry`, making the ledger bitemporal, so both views come from the entries.
+Each entry knows which day it counts for, but not which day it arrived.
 
-### 3. Holds live outside the ledger
-**Why:** "A hold reduces available balance but not ledger balance." Keeping holds out of `AppendOnlyLedger` makes that true by construction.
+**Why:** it keeps the entry model small.
 
-**Cost:** a hold's `status` is mutated in place (ACTIVE → SETTLED), so authorization history is not append-only the way money entries are. The per-day report has to take snapshots of the states to show what they were at each close. An append-only list of hold events (APPROVED, SETTLED, RELEASED) would remove the need for both.
+**Cost:** you can't ask the ledger afterwards what Day2 looked like as of Day5. The replay gets round this by taking a snapshot at each day's close. Criterion 1's test has to rebuild that view by hand, leaving out E9 and the fees. With more time I'd add an arrival date (`postedOn`) to each entry, so both views come straight from the ledger.
 
-### 4. Fees: re-check every value date at each close
-**Why:** the fee rule is defined per day, on "all entries with value_date ≤ that day", and the fee is booked with that day's value date. A back-valued debit must therefore be able to trigger a fee for a past day. Dates are checked in ascending order because a fee for day d is part of day d+1's balance. The (account, date) key makes re-checking safe.
+## 3. Holds live outside the ledger
 
-**Cost:** O(days × entries) per close. A single late debit can produce several fees at one close (three at Day5). Fees record the date they are for (`referenceId = valueDate`), not the entry that caused them. So when E9 reverses E7, nothing can tell which fees E7 caused. `tests/known-gap.test.ts` shows the result: AED 75.00 is charged for a reversed debit.
+**Why:** "A hold reduces available balance but not ledger balance." If holds aren't in the ledger, that's true automatically.
 
-**Rejected alternative:** assess only the value dates touched by that day's debits. It missed Day4 and Day5.
+**Cost:** a hold's status is changed in place (ACTIVE → SETTLED), so authorizations don't have the same append-only history as money. That's also why the report has to snapshot states at each close. A list of hold events (approved, settled, released) would fix both.
 
-### 5. Interest: once, at the last close, from final history
-**Why:** nothing is capitalized before Day6, and by then E7, E9 and the fees have restated Day2–Day5. Daily accrual entries would need corrections. The capitalized credit is defined as the sum of the rounded daily accruals, so the two always agree.
+## 4. Fees: check every day, every close
 
-**Cost:** no interest figure is final before Day6. Per-day rounding (0.93) differs from rounding the total (0.92), and the brief requires per-day.
+**Why:** the fee rule is defined per day, on "all entries with value_date ≤ that day", and the fee carries that day's value date. So a back-dated debit has to be able to cause a fee for an earlier day. Days are checked oldest first because a fee on one day is part of the next day's balance. Fees are tracked per account and day, so checking again never charges twice.
 
-### 6. Stream order is authoritative
-**Why:** the brief says "replayed in this order". E10 (labelled Day5) arrives after E9 (Day6). Re-opening a closed day would rewrite what was already reported. Rejecting the event would lose money.
+**Cost:**
+- It's slower: every close checks every day against every entry.
+- One late debit can trigger several fees at once. Here, three at Day5's close.
+- A fee knows which day it's for, but not which entry caused it. So when E9 cancels E7, nothing can tell which fees E7 was responsible for. `tests/known-gap.test.ts` shows the outcome: AED 75.00 charged for a debit the bank took back.
 
-**Cost:** ACC-002's Day5 shows 0.000 as known and 10.000 final. This is intentional and flagged with a WARNING.
+**What I tried first:** only checking days touched by that day's debits. It missed Day4 and Day5.
 
-### 7. Money as integer minor units (bigint)
-**Why:** exact arithmetic, and AED (100) and BHD (1000) scales are explicit. No floating point anywhere.
+## 5. Interest is calculated once, at the end
 
-**Cost:** rounding is written by hand (`roundHalfUp` in InterestService), and currency mismatches are caught at run time, not by the type system.
+**Why:** nothing gets paid until Day6, and by then E7, E9 and the fees have rewritten Day2 to Day5. Booking interest daily would mean correcting it afterwards. The amount paid is defined as the sum of the rounded daily amounts, so the two always match.
 
-### 8. Single-entry customer ledger
-Only customer accounts are modelled. A production core would be double-entry: a fee credits a fee-income account, interest debits an interest-expense account, and an unknown settlement lands in a suspense account, so every posting balances to zero. This was left out because the brief asks only for customer balances, fees, authorization states and errors.
+**Cost:** there's no final interest figure until Day6. And rounding each day separately (0.93) gives a different answer from rounding the total once (0.92). The brief asks for the day-by-day version.
 
-### 9. Out of scope
-Persistence, concurrency, durable idempotency (duplicate guards are in memory only), hold expiry and release, fee caps, fee refunds, chargebacks, FX.
+## 6. Stream order wins
+
+**Why:** the brief says to replay "in this order". E10 (labelled Day5) arrives after E9 (Day6). Reopening Day5 would rewrite something already reported, and refusing E10 would lose money.
+
+**Cost:** ACC-002's Day5 reads 0.000 as known at the time and 10.000 in the final history. That's deliberate, and the report flags it.
+
+## 7. Money as whole fils (bigint)
+
+**Why:** the arithmetic is exact, and the scales (100 for AED, 1000 for BHD) are spelled out. There's no floating point anywhere.
+
+**Cost:** rounding has to be written by hand (`roundHalfUp` in InterestService). Mixing currencies is caught when the code runs, not by the type checker.
+
+## 8. Only the customer side of the books
+
+Only customer accounts are modelled. A real core banking system would be double-entry: a fee would also credit a fee-income account, interest would debit an interest-expense account, and an unknown settlement would sit in a suspense account, so every posting balances. I left that out because the brief only asks about customer balances, fees, authorizations and errors.
+
+## 9. Not built
+
+- saving anything to disk
+- concurrency
+- durable duplicate protection (the current checks only live in memory)
+- hold expiry and release
+- fee caps
+- fee refunds
+- chargebacks
+- currency exchange

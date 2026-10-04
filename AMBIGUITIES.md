@@ -1,125 +1,134 @@
-# Ambiguities and Resolutions
+# Ambiguities
+
+The brief leaves quite a few things open. Here's each one I ran into, what I decided and why. Where a decision changes a number, I've given the number.
 
 ## Arrival day vs value date
 
-E7 arrives on Day5 but has value date Day2.
+E7 arrives on Day5 but its value date is Day2.
 
-Resolution: events are processed in arrival order, while their accounting effect uses the supplied value date.
+**Decision:** events are processed in the order they arrive. Their effect on balances uses the value date they carry.
 
-## Late overdraft fee
+## Charging fees for past days
 
-The requirements do not say when a fee is created when a late event changes a historical day.
+The brief doesn't say what happens when a late event turns an earlier day negative. Does that day get a fee?
 
-Resolution: at the end of every day, the replay re-checks every value date from Day1 up to the day being closed, in ascending order. Any date whose closing balance is negative and has no fee yet is charged one. The (account, date) key means a date is never charged twice.
+**Decision:** yes. At the end of every day, I go back through every value date from Day1 up to that day, oldest first. Any date that closes negative and hasn't been charged yet gets a fee. A fee is tracked per account and date, so no date can be charged twice.
 
-Why: the rule is "assessed once per day per account when that day's closing ledger balance (all entries with value_date ≤ that day) is negative", and the fee is "booked with value_date equal to the day assessed". Both phrases only matter if past days can be assessed.
+**Why:** the rule says a fee is due when "that day's closing ledger balance (all entries with value_date ≤ that day) is negative", and that the fee is booked "with value_date equal to the day assessed". Both phrases only make sense if past days can be charged.
 
-Effect: E7 (posted Day5, value Day2) makes Day2 (−370.00), Day4 (−180.00 after the Day2 fee) and Day5 (−205.00) negative, so Day5's close books three fees. Day3 stays positive at 5.00: the 400.00 credit covers −395.00.
+**What it does here:** E7 turns three days negative, so Day5's close charges three fees.
+- Day2 goes to −370.00.
+- Day4 goes to −180.00, once the Day2 fee is counted.
+- Day5 goes to −205.00.
 
-Alternative considered and dropped: assessing only the value dates touched by that day's debits (the earlier version of this code). It charged Day2 only, and missed Day5 even though Day5 was the day being closed and closed negative. See REJECTED.md.
+Day3 just about survives at 5.00, because the 400.00 credit covers the −395.00.
 
-## Fee order and cascading
+**What I tried first:** only checking dates that had a debit that day. That charged Day2 and nothing else. It even missed Day5, which was the day being closed and was clearly negative. REJECTED.md has more on this.
 
-Dates are checked in ascending order because a fee booked for day d is part of day d+1's closing balance. A fee can therefore push the next day negative. In this stream it does not: Day3 is 5.00.
+## Fees affecting later days
 
-## Fees for the BHD account
+Dates are checked oldest first, because a fee on one day is part of the next day's balance. So a fee can push the following day negative. It doesn't happen here: Day3 stays at 5.00.
 
-The brief gives an AED 25.00 fee only. There is no BHD amount and no FX rate.
+## No fee for the BHD account
 
-Resolution: ACC-002 has no fee configured, so no fee is booked. Charging 25.000 BHD would be roughly ten times too much, and inventing an FX rate is not supported by the brief. ACC-002 never goes negative in this stream.
+The brief only gives an AED 25.00 fee. There's no BHD amount and no exchange rate.
 
-## Zero balance
+**Decision:** ACC-002 has no fee set, so it never gets charged. Charging 25.000 BHD would be about ten times too much, and I didn't want to make up an exchange rate. It doesn't matter in practice, because ACC-002 never goes negative.
 
-0.00 is not negative, so no fee. Interest also requires a balance strictly greater than zero.
+## Is zero negative?
 
-## Reversal and fees
+No. A balance of exactly 0.00 doesn't get a fee, and it doesn't earn interest either. Interest needs a balance above zero.
 
-The requirements suggest E9 could return balances and fees to the pre-E7 state.
+## Fees after the reversal
 
-Resolution: E9 compensates E7 with a new entry, but the three fees stay booked. The reason is that the brief has no fee-refund rule and refunding is a business decision. Append-only is not the reason: a refund would be new +25.00 entries, not deletions. The cost is shown by `tests/known-gap.test.ts`.
+You could read the brief as saying E9 should put everything back the way it was before E7, fees included.
 
-## Closing balance vs pre-fee balance
+**Decision:** E9 adds an entry that cancels E7, but the three fees stay. The reason isn't the append-only rule: a refund would just be three new +25.00 entries. The real reason is that the brief has no refund rule, and whether to refund is a business decision, not a coding one. `tests/known-gap.test.ts` shows what this costs the customer.
 
-The stated Day2 -370.00 value is the historical balance immediately after E7 and before the fee.
+## Before or after the fee?
 
-The final ledger balance after the fee is -395.00 before reversal, and 225.00 after E9.
+The −370.00 for Day2 is the balance straight after E7 and before the fee. After the fee it's −395.00. After E9 reverses E7, it's 225.00.
 
-## Authorization after late debit
+## The authorization after the late debit
 
-E8 is processed after E7 has arrived.
+E8 (Auth-B) arrives after E7 has already been posted.
 
-Resolution: authorization uses the ledger state available at processing time, including value-dated effects already replayed. At E8 the Day5 balance is −155.00. Fees are only booked at the day's close, so they are not counted yet. Available after the hold would be −245.00, so Auth-B is declined. With the fees it would be −320.00, declined either way.
+**Decision:** the authorization check uses whatever the ledger knows at that moment, including E7. On Day5 that's −155.00. Fees only get charged at the end of the day, so they aren't counted yet. Taking the 90.00 hold would leave −245.00, so Auth-B is declined. Counting the fees it would be −320.00, so it's declined either way.
 
-## Debits are not balance-checked
+## Debits aren't checked against the balance
 
-The brief applies the available-balance test to authorizations only. E7 is posted even though it overdraws. The overdraft fee is the consequence.
+The brief only applies the available-balance check to authorizations, so E7 goes through even though it overdraws the account. The overdraft fee is the consequence.
 
-## Partial and over-settlement
+## Settling for less, or more, than the hold
 
-Auth-A held 200.00 and settled for 185.00. The hold is cleared in full and the unused 15.00 is no longer reserved. A settlement above the hold is rejected (AMOUNT_EXCEEDS_HOLD). That is a choice: real card schemes allow some over-settlement, for example tips.
+Auth-A held 200.00 and settled for 185.00. The whole hold is cleared, so the leftover 15.00 is free again.
 
-## Settlement without an authorization (Auth-Z)
+A settlement for more than the hold is rejected. That's my choice, and it's stricter than real card schemes, which allow some overshoot (tips, for example).
 
-Rejected with an error, and nothing is posted to the customer account. In real card processing, clearing records without a matching authorization (offline transactions, force posts) are normal. The money has usually already left the bank, so a production system would post it to a suspense account and investigate. For a customer-ledger core with no suspense account in scope, rejecting it is the safe choice.
+## A settlement with no authorization (Auth-Z)
 
-## Stream order vs day label (E10)
+**Decision:** it's rejected with an error, and nothing touches the customer's account.
 
-E10 is labelled Day5 but arrives after E9 (Day6). The brief says "replayed in this order".
+In real card processing these turn up all the time: offline transactions, force posts. By the time the clearing file arrives, the money has usually already left the bank. So a real system would park it in a suspense account and investigate. This project doesn't have a suspense account, so rejecting it is the safe option here.
 
-Resolution: the processing clock only moves forward. E10 is processed during Day6 and keeps value date Day5, and a `WARNING (accepted)` line is reported. Day5 is not re-closed. ACC-002's Day5 as-known close is 0.000 and its final Day5 close is 10.000. The earlier version of this code re-opened Day5 for E10 and then closed it a second time after Day6.
+## E10 arrives out of order
 
-## As-known vs final balances in the report
+E10 is labelled Day5 but turns up after E9, which is Day6. The brief says to replay "in this order".
 
-Printing only final balances would hide what was known each day. Printing only as-known balances would hide the restatement. Both are printed.
+**Decision:** the clock only moves forward. E10 is processed on Day6, keeps its Day5 value date and gets flagged with a `WARNING (accepted)`. Day5 isn't reopened. So ACC-002 shows 0.000 for Day5 as known at the time, and 10.000 for Day5 in the final history.
+
+The first version of the code got this wrong: it closed Day6 when E10 arrived, then closed Day5 a second time at the end.
+
+## Which balance the report shows
+
+If the report only showed final balances, you couldn't see what was known on each day. If it only showed as-known balances, you couldn't see how history was corrected. So it shows both.
 
 ## Authorization states in the report
 
-The report shows each authorization's state as it stood at that day's close. The earlier version showed the final state on every day, so Day2 reported Auth-A as SETTLED two days before E5 settled it.
+Each authorization is shown as it was at that day's close. The earlier version showed the final state every day, so Auth-A appeared SETTLED on Day2, two days before it actually settled.
 
-## Days with no events
+## Quiet days
 
-Every day in the window is closed in order, even a day with no events, so its fee check and report still run.
+Every day gets closed in order, even if nothing happened, so its fee check and report still run.
 
-## BHD installments
+## Splitting BHD 10.000 into three
 
-Three installments of 3.334 would total 10.002.
+Three payments of 3.334 would add up to 10.002.
 
-Resolution: preserve the original amount exactly using 3.334, 3.333 and 3.333.
+**Decision:** 3.334 + 3.333 + 3.333, which adds up to exactly 10.000.
 
-## Interest timing
+## When interest is worked out
 
-Resolution: at Day6's close, calculate each day's interest from the final value-dated history, then capitalize the total on Day6.
+**Decision:** at Day6's close, interest for every day is calculated from the final history and paid as one total.
 
-The alternative was to accrue on each day's balance as known at its close (250, 250, 650, 465, −230 → 0, 390), which gives 0.81 instead of 0.93. It was not used because nothing is capitalized before Day6, and by then Day2–Day5 have been restated by E7, E9 and the fees.
+The alternative was to accrue each day on the balance as it looked that evening (250, 250, 650, 465, −230 → 0, 390). That gives 0.81 instead of 0.93. I didn't do that, because nothing gets paid until Day6, and by then E7, E9 and the fees have changed Day2 to Day5.
 
-The Day6 accrual uses the balance before the capitalization credit, so the credit does not earn interest on itself.
+Day6's interest is worked out on the balance before the interest credit, so the credit doesn't earn interest on itself.
 
 ## Rounding mode
 
-The brief does not specify one. Half-up is used. No daily accrual in this stream lands exactly on a half (0.166 and 0.156), so the choice changes no number here.
+The brief doesn't specify one, so I used half-up. None of the daily amounts here land exactly on a half (0.166 and 0.156 are the closest), so the choice doesn't change any number.
 
-## Per-day rounding vs rounding the total
+## Round each day, or round the total?
 
-The brief requires the rounded daily accruals to sum to the credit. The raw ACC-001 accruals sum to 0.918, which would round to 0.92. The rounded daily figures sum to 0.93, and 0.93 is capitalized.
+The brief says the rounded daily amounts must add up to the credit. The raw daily amounts for ACC-001 add up to 0.918, which would round to 0.92. Rounded day by day they add up to 0.93, so 0.93 is what gets paid.
 
-## Interest remainder
+## Discarding a rounding remainder
 
-The wording says a rounding remainder may be discarded.
+One of the criteria says any rounding remainder can be thrown away.
 
-Resolution: no monetary remainder is discarded. The exact sum of rounded daily accruals is capitalized.
+**Decision:** nothing is thrown away. The credit is simply the sum of the rounded daily amounts.
 
-## Duplicate events
+## The same event twice
 
-The assessment does not define duplicate event delivery.
+The brief doesn't say what to do with a duplicate.
 
-Resolution: a repeated event ID within a replay is reported and ignored, and the ledger rejects a repeated entry ID. Both guards are in memory only; production would require a durable idempotency store.
+**Decision:** a repeated event ID is reported and ignored, and the ledger refuses a repeated entry ID. Both checks only live in memory. A real system would need something durable.
 
-## Declined vs released authorizations
+## Declined vs released
 
-Resolution: a refused authorization is recorded as DECLINED and never reserves funds. RELEASED is reserved for holds that were active and later given back.
+A declined authorization never held any money, so it's marked DECLINED. RELEASED is kept for holds that were active and then given back. Mixing the two up would confuse an audit.
 
-## Authorization lifecycle
+## The authorization lifecycle
 
-The supplied stream only demonstrates approval and settlement.
-
-Production would additionally need expiry, cancellation, release and partial-capture semantics.
+This stream only uses approve and settle. A real system would also need expiry, cancellation, release and partial capture.

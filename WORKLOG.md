@@ -52,33 +52,43 @@
 ### 12:18:56 +0400
 - Documented ledger decisions, numbers, ambiguities, rejected criteria and assessment trade-offs.
 
-## Design Decisions
+## Design decisions, in short
 
 - Ledger entries are append-only.
-- Reversals use compensating entries instead of mutating existing entries.
-- Value dates are preserved independently from event arrival days.
-- Authorization holds reduce available balance but do not change ledger balance.
-- Unknown authorization settlements are rejected without debiting funds.
-- Overdraft fees are assessed once per account and assessed date.
-- Daily interest is calculated on positive closing balances only.
-- Monetary values use integer minor units with currency-specific precision.
-- Exact monetary conservation takes priority over equal rounded installments.
-- BHD 10.000 is split as 3.334 + 3.333 + 3.333 to conserve the exact amount.
-- Rounded daily interest accruals are summed exactly before capitalization.
-- Fees remain after later reversals because the brief defines no refund rule (a refund would be new appended entries).
+- Reversals add an opposite entry; nothing is edited.
+- Every event keeps two dates: when it arrived and which day it counts for.
+- Holds lower available balance, not ledger balance.
+- A settlement with no matching authorization is rejected, and the customer isn't charged.
+- At most one overdraft fee per account per day.
+- Only positive balances earn interest.
+- Money is stored in whole fils, at each currency's own precision.
+- The exact total matters more than identical instalments, so BHD 10.000 becomes 3.334 + 3.333 + 3.333.
+- The interest paid is exactly the sum of the rounded daily amounts.
+- Fees stay after a reversal because the brief has no refund rule. A refund would just be new entries.
 
 ## 2026-10-04 (correctness review)
 
 ### 18:09–18:15 +0400
-- AI-assisted review (Claude): checked the replay against independently derived figures and found five problems.
-  - Overdraft fees were only assessed for value dates touched by that day's debits, so E7 produced 1 fee instead of 3. Day5 was missed even though Day5 was the day being closed and closed negative.
-  - A late event (E10) made the replay close Day6, then close Day5 again.
-  - The daily report showed final authorization states on every day (Auth-A SETTLED on Day2).
-  - There was no runnable replay script.
-  - The only "failing" test used `it.fails`, so it passed.
-- Fixed: every value date up to the closing day is re-checked at each close; the clock only moves forward, with a late-arrival warning; authorization states and as-known balances are snapshotted at each close; added `npm run replay`; added one real failing test (`tests/known-gap.test.ts`).
-- Updated the tests to the corrected figures: 3 fees (Day2, Day4, Day5), interest 0.93 (was 0.98), Day4 final 415.00 (was 440.00).
-- Updated README, AMBIGUITIES, REJECTED and NUMBERS to match.
+- Reviewed the replay with AI help (Claude), checking it against figures worked out separately. Found five problems:
+  - Fees were only checked on days that had a debit that day, so E7 caused 1 fee instead of 3. It even missed Day5, the day being closed, which was negative.
+  - The late E10 made the replay close Day6, then close Day5 a second time.
+  - The report showed each authorization's final state on every day, so Auth-A appeared SETTLED on Day2.
+  - There was no script to run the replay.
+  - The only "failing" test used `it.fails`, which means it actually passed.
+- Fixed all five:
+  - every day up to the one being closed is checked for fees;
+  - the clock only moves forward, and late events are flagged;
+  - each day's balances and authorization states are snapshotted at close;
+  - added `npm run replay`;
+  - added a real failing test (`tests/known-gap.test.ts`).
+- Updated the tests to the corrected numbers: 3 fees (Day2, Day4, Day5), interest 0.93 (was 0.98), Day4 final 415.00 (was 440.00). Updated README, AMBIGUITIES, REJECTED and NUMBERS to match.
 
 ### 18:20–18:25 +0400
-- AI-assisted (Claude) documentation check after merging the fixes. Fixed an unclosed code block in README that made the rest of the README render as code. Corrected three places that gave append-only as the reason fees are not refunded; the actual reason is that the brief has no refund rule. Aligned the Auth-Z wording in REJECTED.md with AMBIGUITIES.md. Added ARCHITECTURE.md (design and trade-offs).
+- Went through the docs again with AI help (Claude):
+  - Fixed an unclosed code block that made half the README render as code.
+  - Corrected three places that said fees can't be refunded because of append-only. The real reason is that there's no refund rule.
+  - Made the Auth-Z wording in REJECTED.md match AMBIGUITIES.md.
+  - Added ARCHITECTURE.md.
+
+### 18:25–18:30 +0400
+- Rewrote README, AMBIGUITIES, NUMBERS, REJECTED and ARCHITECTURE in plainer language, with AI help (Claude). The numbers and decisions are unchanged; only the wording is different.
