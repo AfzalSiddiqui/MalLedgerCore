@@ -85,4 +85,14 @@ export type LedgerEvent =
       readonly amount: Money;
       readonly valueDate: 'Day5';
       readonly installments: 3;
+    }
+  | {
+      // Not in the brief's stream: a merchant cancellation, terminal-timeout
+      // reversal or expiry that ends a hold without a settlement.
+      readonly eventId: string;
+      readonly type: 'AUTHORIZATION_RELEASE';
+      readonly day: string;
+      readonly accountId: string;
+      readonly authorizationId: string;
+      readonly valueDate: string;
     };
