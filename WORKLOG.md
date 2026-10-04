@@ -116,6 +116,10 @@
 - Added the reasoning for criteria 1, 3, 4 and 5 to REJECTED.md, and updated AMBIGUITIES, README and ARCHITECTURE.
 - Measured how authorization cost grows with volume, for the Part 2 document. With 100 accounts: 1,000 authorize+settle pairs took 31 ms, 10,000 took 1.4 s and 30,000 took 12.5 s. Per-pair cost grows linearly with history, so total cost grows quadratically.
 
+### 18:58:18 +0400
+- Replaced the short architecture overview with the full Part 2 trade-off analysis: scale limits, value-date production controls, authorization lifecycle paths, and the ranked list of intentionally deferred production concerns.
+- Confirmed the documented fee and interest decisions match the implementation: historical fee reassessment for back-valued entries and interest capitalization from final restated history on Day6.
+
 ## 2026-10-04 (verification-command cleanup)
 
 ### 18:49:01 +0400

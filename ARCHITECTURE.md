@@ -1,95 +1,107 @@
-# Architecture
+# MalLedgerCore — Architecture & Trade-offs
 
-## The big picture
+Part 2 of the ledger exercise. This document describes the TypeScript implementation in this repository: `AppendOnlyLedger`, `AuthorizationService`, `SettlementService`, `FeeService`, `InterestService`, and `LedgerReplay`.
 
-```text
-SCENARIO_EVENTS (in stream order)
-        |
-        v
-LedgerReplay.replay()            the clock runs Day1 to Day6 and never goes back
-   |  for each event: close any days we've moved past, then handle the event
-   |  late event (E10)? flag it, handle it today, keep its value date
-   |
-   +--> AppendOnlyLedger         money entries: CREDIT, DEBIT, FEE, INTEREST, REVERSAL
-   +--> AuthorizationService     holds: ACTIVE / DECLINED / SETTLED (kept outside the ledger)
-   +--> SettlementService        posts a DEBIT and marks the hold SETTLED
-   +--> ReversalService          posts an opposite REVERSAL entry
-   |
-   +--> closeDay(day)
-          1. fees: check every value date from Day1 to today, oldest first
-          2. last day only: work out interest for every day, pay the total
-          3. snapshot balances, authorization states and fees for the report
-        |
-        v
-DailyReport[]  ->  src/run.ts prints it (npm run replay)
-```
+`npm run test:all` runs 63 tests. Exactly one intentionally fails: `tests/known-gap.test.ts`.
 
-Below are the main decisions and what each one costs.
+## 1. Append-only at scale
 
-## 1. Balances are worked out, not stored
+### What breaks first at 100× volume
 
-`balanceAt(account, valueDate)` adds the opening balance to every entry with a value date on or before the date asked for.
+The authorization path breaks first because its cost grows with the square of volume, not linearly. Every authorization calls `availableBalance`, which:
 
-**Why:** a back-dated entry like E7 (arrives Day5, counts from Day2) changes every balance from Day2 onwards. A balance that's always recalculated can't go out of date.
+- calls `balanceAt`, copying and scanning every entry for the account;
+- calls `holdsFor`, filtering one global array of all holds, including settled and declined ones.
 
-**Cost:** every lookup goes through every entry. That's nothing with the 14 entries in this replay, but it would hurt at bank scale. At scale I'd cache a balance per account per day and throw the cache away from the value date of any back-dated entry onwards. The entries would stay the source of truth.
+Each authorization therefore gets slower as history grows, and the total cost grows quadratically. Measurements taken against this implementation with 100 accounts and authorize-plus-settle pairs:
 
-## 2. Entries have a value date but no arrival date
+| Pairs processed | Total time | Time per pair |
+|---:|---:|---:|
+| 1,000 | 31 ms | 31 µs |
+| 10,000 (10×) | 1.4 s | 142 µs |
+| 30,000 (30×) | 12.5 s | 418 µs |
 
-Each entry knows which day it counts for, but not which day it arrived.
+At 100×, an authorization pair would take more than a millisecond and a daily batch would take minutes rather than milliseconds. Card schemes require an issuer response within a fixed window; timeouts and stand-in or declined transactions would begin here.
 
-**Why:** it keeps the entry model small.
+The end-of-day fee sweep is next. Every close re-checks every value date since Day 1 for every account, and every check runs a full `balanceAt` scan. Its cost is accounts × days open × entries per account. It grows indefinitely even at constant transaction volume.
 
-**Cost:** you can't ask the ledger afterwards what Day2 looked like as of Day5. The replay gets round this by taking a snapshot at each day's close. Criterion 1's test has to rebuild that view by hand, leaving out E9 and the fees. With more time I'd add an arrival date (`postedOn`) to each entry, so both views come straight from the ledger.
+### Where state grows without limit
 
-## 3. Holds live outside the ledger
+| Structure | Why it never shrinks |
+|---|---|
+| `entriesByAccount` | The ledger is append-only by design. It is the source of truth, but every read scans it. |
+| `AuthorizationService.holds` | One global hold array; settled and declined holds are neither removed nor indexed. |
+| `AppendOnlyLedger.entryIds` | Global set of every entry ID, retained for duplicate checks. |
+| `processedEventIds`, `FeeService.assessments` | Duplicate and fee guards retain every key forever. |
+| Per-day snapshots and EOD range | One snapshot per closed day; the fee sweep starts at the first day. |
 
-**Why:** "A hold reduces available balance but not ledger balance." If holds aren't in the ledger, that's true automatically.
+### Cheapest structural change that defers it
 
-A hold can end three ways: SETTLED by a settlement, RELEASED by a release event, or DECLINED at the start. Authorizing is idempotent on the authorization ID, so a retransmitted request can't reserve money twice.
+Keep a per-account daily balance bucket (`valueDate → net movement`) updated on every append, plus an earliest-dirty-value-date watermark per account.
 
-**Cost:** a hold's status is changed in place (ACTIVE → SETTLED or RELEASED), so authorizations don't have the same append-only history as money. That's also why the report has to snapshot states at each close. A list of hold events (approved, settled, released) would fix both.
+- `balanceAt` then sums day buckets rather than entries, so cost depends on days rather than transaction history.
+- The fee sweep re-checks only from the watermark forward instead of from Day 1.
+- Holds move to a map keyed by account and authorization ID; terminal holds leave the active set.
 
-## 4. Fees: check every day, every close
+Entries remain the source of truth and buckets can be rebuilt from them. With a back-value limit, dates older than the limit can be frozen and never rechecked.
 
-**Why:** the fee rule is defined per day, on "all entries with value_date ≤ that day", and the fee carries that day's value date. So a back-dated debit has to be able to cause a fee for an earlier day. Days are checked oldest first because a fee on one day is part of the next day's balance. Fees are tracked per account and day, so checking again never charges twice.
+## 2. Value-dated entries in production
 
-**Cost:**
-- It's slower: every close checks every day against every entry.
-- One late debit can trigger several fees at once. Here, three at Day5's close.
-- A fee knows which day it's for, but not which entry caused it. So when E9 cancels E7, nothing can tell which fees E7 was responsible for. `tests/known-gap.test.ts` shows the outcome: AED 75.00 charged for a debit the bank took back.
+A value date changes history that may already have been reported. In a UAE-licensed bank this affects customer statements, fees, reporting periods, AML records, and fraud controls.
 
-**What I tried first:** only checking days touched by that day's debits. It missed Day4 and Day5.
+- **Customer statements and errors.** Under the CBUAE Consumer Protection Standards, customers receive at least monthly statements, errors must be corrected and communicated, and a bank must not benefit from an amount caused by its error. This implementation intentionally does not meet that last production requirement: when E9 reverses E7, the three overdraft fees and the lost interest remain. That is the deliberately failing test, and in production would require a refund workflow.
+- **Fees charged for past days.** A back-valued fee must use the fee schedule that applied on its value date. A single hard-coded AED amount cannot support that; a production fee schedule must be versioned by effective date.
+- **Reporting and accounting periods.** A back-dated entry crossing a closed period cannot silently rewrite a filed regulatory return or month-end general ledger. It must post as a dated adjustment in an open period and report the prior-period effect.
+- **AML and record keeping.** Records need both posting date and value date to reconstruct activity and to understand monitoring windows. Entries here carry only value date; “what was known on day N” comes from snapshots rather than a durable posting-date field.
+- **Internal fraud.** Back-valuing can avoid fees, earn extra interest, or hide an overdraft at a reporting date.
 
-## 5. Interest is calculated once, at the end
+### One control before go-live: a back-value approval gate
 
-**Why:** nothing gets paid until Day6, and by then E7, E9 and the fees have rewritten Day2 to Day5. Booking interest daily would mean correcting it afterwards. The amount paid is defined as the sum of the rounded daily amounts, so the two always match.
+Any entry valued more than one business day before its posting date, or falling in a closed accounting period, should remain pending until a second authorised user approves it with a reason code. The approved entry records posting date, value date, maker, checker, and reason.
 
-**Cost:** there's no final interest figure until Day6. And rounding each day separately (0.93) gives a different answer from rounding the total once (0.92). The brief asks for the day-by-day version.
+Approval recalculates fees and interest from the value date, refunds amounts the bank is not entitled to keep, and queues a customer notification. Small recent corrections can flow straight through; history-rewriting entries get a clear owner and audit trail.
 
-## 6. Stream order wins
+## 3. Authorization lifecycle
 
-**Why:** the brief says to replay "in this order". E10 (labelled Day5) arrives after E9 (Day6). Reopening Day5 would rewrite something already reported, and refusing E10 would lose money.
+The model has `ACTIVE`, `DECLINED`, `SETTLED`, and `RELEASED` holds. A repeated authorization ID returns the original decision rather than adding a second hold. The implemented release event makes `RELEASED` reachable.
 
-**Cost:** ACC-002's Day5 reads 0.000 as known at the time and 10.000 in the final history. That's deliberate, and the report flags it.
+| Path in this model | Real-world scenario | Production behaviour to mandate |
+|---|---|---|
+| Declined at request | Insufficient funds at till or online | Terminal state, no funds reserved, with a scheme decline code. Later clearing is handled as an unmatched settlement. |
+| Never settled | Hotel, car-hire, or fuel pre-authorisation | Scheme/category expiry timer; append `ACTIVE → RELEASED`, free funds, and match any later clearing afterwards. |
+| Released before settlement | Customer cancellation, merchant void, terminal reversal | Implemented for an active hold. Still needed: append-only hold-event history and logged no-ops for unknown or ended holds. |
+| Partially settled | Partial shipment, split clearing, fuel pre-auth | Support multiple clearings; release remainder only on final-clearing or expiry, with a release amount. |
+| Settlement over hold or wrong currency | Tips, incremental charges, cross-currency clearing | Use category tolerance and scheme FX; otherwise post and flag for review. A hold must end consumed or released. |
+| Duplicate authorization ID | Network retransmission | Implemented idempotency. In production key it durably on authorization ID plus scheme trace ID. |
+| Settled then reversed | Refund or chargeback | A separate credit linked to settlement; do not rewrite settled authorization history. |
+| Settlement with no authorization | Offline transaction or force post | Post to suspense and open an exception. Rejecting it only hides money that may have already left the bank. |
 
-## 7. Money as whole fils (bigint)
+## 4. What I cut and why
 
-**Why:** the arithmetic is exact, and the scales (100 for AED, 1000 for BHD) are spelled out. There's no floating point anywhere.
+Ordered by production risk, highest first.
 
-**Cost:** rounding has to be written by hand (`roundHalfUp` in InterestService). Mixing currencies is caught when the code runs, not by the type checker.
+| # | Cut | Why | Production risk deferred |
+|---:|---|---|---|
+| 1 | Fee cause and refund on reversal | The brief gives no refund rule. | High: fees caused by the bank’s own reversed error remain, demonstrated by the failing test. |
+| 2 | Concurrency control | Replay is deterministic and single-threaded. | High: two authorizations can both pass against the same funds. |
+| 3 | Durable idempotency | Duplicate guards are in-memory sets. | High: retries after restart can post or reserve twice. |
+| 4 | Posting date on entries | The exercise is value-date focused. | High: audit and AML reconstruction rely on snapshots. |
+| 5 | Persistence, recovery, checkpoints | The brief explicitly requires in-memory only. | High: a crash loses state. |
+| 6 | Limit on how far back an entry can go | The stream includes a late event. | Medium: history can be rewritten indefinitely. |
+| 7 | Double-entry general ledger and suspense | Only customer balances are in scope. | Medium: the books cannot be proven balanced and unmatched settlements lack a home. |
+| 8 | Hold expiry and append-only hold history | Release exists, but no timer or hold-event ledger exists. | Medium: abandoned holds can reserve funds forever without an audit trail. |
+| 9 | Settlement tolerance, FX, and force posts | Strict matching is the safe exercise default. | Medium: legitimate clearing can be refused and scheme/customer records can drift. |
+| 10 | Fee schedule by currency/date and caps | The brief supplies only AED 25.00. | Medium: BHD has no fee, old schedules cannot be honoured, and back-valued fees can burst. |
+| 11 | Customer notification and statement restatement | Out of scope. | Medium: errors may not be communicated or reflected in statements. |
+| 12 | Business calendar | Days are labels, not dates. | Lower: no weekends, holidays, cut-offs, or time-zone rules. |
+| 13 | Daily accrual entries, configurable rounding, debit interest | Interest is needed only at the window end. | Lower: reporting lacks daily accrual entries and rounding bias cannot be configured. |
 
-## 8. Only the customer side of the books
+## 5. Deterministic policy decisions in this exercise
 
-Only customer accounts are modelled. A real core banking system would be double-entry: a fee would also credit a fee-income account, interest would debit an interest-expense account, and an unknown settlement would sit in a suspense account, so every posting balances. I left that out because the brief only asks about customer balances, fees, authorizations and errors.
+These choices are deliberate rather than unresolved:
 
-## 9. Not built
+- **Late values and fees:** every close rechecks historical value dates through the current day. This follows the explicit fee definition: a day is assessed from all entries with `value_date ≤ that day`. E7 therefore makes Days 2, 4, and 5 negative and produces three once-per-day fees, each tagged with its assessed date.
+- **Interest:** interest is computed and capitalized only on Day 6 from the final restated value-dated history. This prevents paying an amount that later reversals and restated fees have changed, while still capitalizing exactly the sum of the separately rounded daily accruals.
+- **Stream order:** stream order is authoritative. E10 is accepted on Day 6 with a Day 5 value date and a warning; the closed Day 5 reporting snapshot is not reopened.
 
-- saving anything to disk
-- concurrency
-- durable duplicate protection (the current checks only live in memory)
-- hold expiry and release
-- fee caps
-- fee refunds
-- chargebacks
-- currency exchange
+The full numerical derivations are in [NUMBERS.md](NUMBERS.md), and the remaining specification ambiguities are recorded with their resolutions in [AMBIGUITIES.md](AMBIGUITIES.md).
