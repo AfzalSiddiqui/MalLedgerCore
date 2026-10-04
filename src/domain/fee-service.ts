@@ -21,6 +21,11 @@ export class FeeService {
       return null;
     }
 
+    // No fee configured for this account: never book a zero-value FEE entry.
+    if (!this.overdraftFee.isPositive()) {
+      return null;
+    }
+
     const closingBalance = this.ledger.balanceAt(
       account,
       assessedDate,

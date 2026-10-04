@@ -10,7 +10,9 @@ Resolution: events are processed in arrival order, while their accounting effect
 
 The requirements do not explicitly define when a fee is created when a late event changes a historical day.
 
-Resolution: when replay identifies a negative historical balance, one fee is assessed for that value date.
+Resolution: overdraft fees are assessed at end of each arrival day, on the closing balance. Every value date touched that day by a debit or a settlement is assessed once; a debit followed by a same-day credit that keeps the close positive is not charged.
+
+A late event can also turn later, untouched days negative (after E7 and before E9, Day4 and Day5 close at -180.00). These are deliberately not re-assessed automatically: charging fees for restated days is a back-value decision that belongs to an approval workflow, not to the replay engine.
 
 ## Reversal and fees
 
@@ -50,7 +52,11 @@ Resolution: no monetary remainder is discarded. The exact sum of rounded daily a
 
 The assessment does not define duplicate event delivery.
 
-Resolution: the assessment assumes unique event IDs. Production would require durable idempotency handling.
+Resolution: a repeated event ID within a replay is reported and ignored, and the ledger rejects a repeated entry ID. Both guards are in memory only; production would require a durable idempotency store.
+
+## Declined vs released authorizations
+
+Resolution: a refused authorization is recorded as DECLINED and never reserves funds. RELEASED is reserved for holds that were active and later given back.
 
 ## Authorization lifecycle
 

@@ -7,6 +7,8 @@ import { InterestService } from '../domain/interest-service.js';
 import { Money } from '../domain/money.js';
 import { ReversalService } from '../domain/reversal-service.js';
 import { SettlementService } from '../domain/settlement-service.js';
+import { SettlementRejectionReason } from '../domain/settlement.js';
+import { compareValueDates, isOnOrBefore } from '../domain/value-date.js';
 import { LedgerEntry } from '../domain/ledger-entry.js';
 import { LedgerEvent } from './events.js';
 
@@ -48,6 +50,8 @@ export class LedgerReplay {
   private readonly reversalService: ReversalService;
   private readonly feeServices: Map<string, FeeService>;
   private readonly interestServices: Map<string, InterestService>;
+  private readonly pendingOverdraftDates = new Map<string, Set<string>>();
+  private replayed = false;
 
   constructor(
     private readonly accounts: readonly Account[],
@@ -83,9 +87,40 @@ export class LedgerReplay {
   }
 
   replay(events: readonly LedgerEvent[]): ReplayResult {
+    // The ledger, holds and fee state live on this instance. Replaying a
+    // second stream into the same state would double-post, so a replay is
+    // one-shot: reject before touching anything.
+    if (this.replayed) {
+      throw new Error(
+        'LedgerReplay has already replayed a stream; create a new instance to replay again',
+      );
+    }
+
+    this.replayed = true;
+
     const errors: ReplayError[] = [];
+    const processedEventIds = new Set<string>();
+    let currentDay: string | undefined;
 
     for (const event of events) {
+      if (currentDay !== undefined && event.day !== currentDay) {
+        this.closeDay(currentDay, errors);
+      }
+
+      currentDay = event.day;
+
+      // Idempotency: a redelivered event is reported and has no effect.
+      if (processedEventIds.has(event.eventId)) {
+        errors.push({
+          eventId: event.eventId,
+          day: event.day,
+          message: `Duplicate event ${event.eventId} ignored`,
+        });
+        continue;
+      }
+
+      processedEventIds.add(event.eventId);
+
       const account = this.findAccount(event.accountId);
 
       if (!account) {
@@ -107,6 +142,10 @@ export class LedgerReplay {
             error instanceof Error ? error.message : String(error),
         });
       }
+    }
+
+    if (currentDay !== undefined) {
+      this.closeDay(currentDay, errors);
     }
 
     const interestAccruals: InterestAccrual[] = [];
@@ -147,19 +186,23 @@ export class LedgerReplay {
   ): void {
     switch (event.type) {
       case 'CREDIT':
+        assertPositive(event.eventId, event.amount);
         this.appendSignedEntry(account, event, event.amount);
         return;
 
       case 'DEBIT': {
+        // Same guard as settlement: a negative "debit" would credit the account.
+        assertPositive(event.eventId, event.amount);
+
         const debitAmount = Money.zero(account.currency).subtract(
           event.amount,
         );
 
         this.appendSignedEntry(account, event, debitAmount);
 
-        const feeService = this.feeServices.get(account.id)!;
-
-        feeService.assessOverdraft(account, event.valueDate);
+        // The fee is decided on the closing balance at end of day, not on
+        // the intraday balance straight after this debit.
+        this.markForOverdraftAssessment(account, event.valueDate);
 
         return;
       }
@@ -196,9 +239,17 @@ export class LedgerReplay {
           errors.push({
             eventId: event.eventId,
             day: event.day,
-            message: `Settlement ${event.eventId} rejected: authorization ${event.authorizationId} is not active`,
+            message: `Settlement ${event.eventId} rejected: ${describeSettlementRejection(
+              settlement.rejectionReason,
+              event.authorizationId,
+            )}`,
           });
+
+          return;
         }
+
+        // A settlement is a ledger debit too, so it can cause an overdraft.
+        this.markForOverdraftAssessment(account, event.valueDate);
 
         return;
       }
@@ -228,6 +279,50 @@ export class LedgerReplay {
     }
   }
 
+  private markForOverdraftAssessment(
+    account: Account,
+    valueDate: string,
+  ): void {
+    const dates =
+      this.pendingOverdraftDates.get(account.id) ?? new Set<string>();
+
+    dates.add(valueDate);
+
+    this.pendingOverdraftDates.set(account.id, dates);
+  }
+
+  /**
+   * End-of-day processing for one arrival day: every value date touched by a
+   * debit or settlement that day is assessed once, on its closing balance as
+   * it stands after all of the day's events.
+   */
+  private closeDay(day: string, errors: ReplayError[]): void {
+    for (const account of this.accounts) {
+      const dates = this.pendingOverdraftDates.get(account.id);
+
+      if (!dates) {
+        continue;
+      }
+
+      const feeService = this.feeServices.get(account.id)!;
+
+      for (const valueDate of [...dates].sort(compareValueDates)) {
+        try {
+          feeService.assessOverdraft(account, valueDate);
+        } catch (error) {
+          errors.push({
+            eventId: `EOD-${account.id}-${valueDate}`,
+            day,
+            message:
+              error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+    }
+
+    this.pendingOverdraftDates.clear();
+  }
+
   private appendSignedEntry(
     account: Account,
     event: LedgerEvent,
@@ -251,16 +346,18 @@ export class LedgerReplay {
       event.installments,
     );
 
-    installments.forEach((amount, index) => {
-      this.ledger.append(account, {
+    // All installments post together or none do.
+    this.ledger.appendAll(
+      account,
+      installments.map((amount, index) => ({
         entryId: `${event.eventId}-${index + 1}`,
         accountId: account.id,
-        type: 'CREDIT',
+        type: 'CREDIT' as const,
         amount,
         valueDate: event.valueDate,
         referenceId: event.eventId,
-      });
-    });
+      })),
+    );
   }
 
   private buildDailyReports(
@@ -288,7 +385,7 @@ export class LedgerReplay {
 
         const holds = this.authorizationService
           .holdsFor(account.id)
-          .filter((hold) => hold.valueDate <= day);
+          .filter((hold) => isOnOrBefore(hold.valueDate, day));
 
         for (const hold of holds) {
           authorizationStates.push(
@@ -316,6 +413,34 @@ export class LedgerReplay {
     return this.accounts.find(
       (account) => account.id === accountId,
     );
+  }
+}
+
+function assertPositive(eventId: string, amount: Money): void {
+  if (!amount.isPositive()) {
+    throw new Error(
+      `Event ${eventId} amount must be positive; direction comes from the event type`,
+    );
+  }
+}
+
+function describeSettlementRejection(
+  reason: SettlementRejectionReason | undefined,
+  authorizationId: string,
+): string {
+  switch (reason) {
+    case 'CURRENCY_MISMATCH':
+      return 'settlement currency does not match the account currency';
+    case 'NON_POSITIVE_AMOUNT':
+      return 'settlement amount must be positive';
+    case 'UNKNOWN_AUTHORIZATION':
+      return `authorization ${authorizationId} does not exist`;
+    case 'AUTHORIZATION_NOT_ACTIVE':
+      return `authorization ${authorizationId} is not active`;
+    case 'AMOUNT_EXCEEDS_HOLD':
+      return `amount exceeds the hold for authorization ${authorizationId}`;
+    default:
+      return `authorization ${authorizationId} could not be settled`;
   }
 }
 

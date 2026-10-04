@@ -1,11 +1,9 @@
 import { Account } from './account.js';
 import { AppendOnlyLedger } from './append-only-ledger.js';
-import {
-  AuthorizationHold,
-} from './authorization-hold.js';
+import { AuthorizationHold } from './authorization-hold.js';
 import { AuthorizationService } from './authorization-service.js';
 import { Money } from './money.js';
-import {  Settlement } from './settlement.js';
+import { Settlement, SettlementRejectionReason } from './settlement.js';
 
 export class SettlementService {
   constructor(
@@ -20,37 +18,44 @@ export class SettlementService {
     amount: Money,
     valueDate: string,
   ): Settlement {
-    const hold = this.findActiveHold(
-      account.id,
+    const reject = (
+      rejectionReason: SettlementRejectionReason,
+    ): Settlement => ({
+      settlementId,
       authorizationId,
-    );
-
-    if (!hold) {
-      return {
-        settlementId,
-        authorizationId,
-        accountId: account.id,
-        amount,
-        valueDate,
-        status: 'REJECTED',
-      };
-    }
+      accountId: account.id,
+      amount,
+      valueDate,
+      status: 'REJECTED',
+      rejectionReason,
+    });
 
     if (amount.currency !== account.currency) {
-      throw new Error(
-        `Settlement currency ${amount.currency} does not match account currency ${account.currency}`,
-      );
+      return reject('CURRENCY_MISMATCH');
+    }
+
+    // A non-positive amount would turn the "debit" into a credit or a no-op
+    // that still consumes the hold.
+    if (!amount.isPositive()) {
+      return reject('NON_POSITIVE_AMOUNT');
+    }
+
+    const holds = this.authorizationService
+      .holdsFor(account.id)
+      .filter((hold) => hold.authorizationId === authorizationId);
+
+    if (holds.length === 0) {
+      return reject('UNKNOWN_AUTHORIZATION');
+    }
+
+    const hold = holds.find((candidate) => candidate.status === 'ACTIVE');
+
+    if (!hold) {
+      return reject('AUTHORIZATION_NOT_ACTIVE');
     }
 
     if (amount.amount > hold.amount.amount) {
-      return {
-        settlementId,
-        authorizationId,
-        accountId: account.id,
-        amount,
-        valueDate,
-        status: 'REJECTED',
-      };
+      return reject('AMOUNT_EXCEEDS_HOLD');
     }
 
     this.ledger.append(account, {
@@ -62,7 +67,7 @@ export class SettlementService {
       referenceId: authorizationId,
     });
 
-    this.releaseHold(hold);
+    this.markSettled(hold);
 
     return {
       settlementId,
@@ -74,20 +79,7 @@ export class SettlementService {
     };
   }
 
-  private findActiveHold(
-    accountId: string,
-    authorizationId: string,
-  ): AuthorizationHold | undefined {
-    return this.authorizationService
-      .holdsFor(accountId)
-      .find(
-        (hold) =>
-          hold.authorizationId === authorizationId &&
-          hold.status === 'ACTIVE',
-      );
-  }
-
-  private releaseHold(hold: AuthorizationHold): void {
+  private markSettled(hold: AuthorizationHold): void {
     hold.status = 'SETTLED';
   }
 }

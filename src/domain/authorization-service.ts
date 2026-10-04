@@ -5,6 +5,7 @@ import {
   AuthorizationHoldStatus,
 } from './authorization-hold.js';
 import { Money } from './money.js';
+import { isOnOrBefore } from './value-date.js';
 
 export class AuthorizationService {
   private readonly holds: AuthorizationHold[] = [];
@@ -30,7 +31,7 @@ export class AuthorizationService {
     const available = this.availableBalance(account, valueDate);
 
     const status: AuthorizationHoldStatus =
-      available.amount >= amount.amount ? 'ACTIVE' : 'RELEASED';
+      available.amount >= amount.amount ? 'ACTIVE' : 'DECLINED';
 
     const hold: AuthorizationHold = {
       authorizationId,
@@ -52,7 +53,7 @@ export class AuthorizationService {
       .filter(
         (hold) =>
           hold.accountId === account.id &&
-          hold.valueDate <= valueDate &&
+          isOnOrBefore(hold.valueDate, valueDate) &&
           hold.status === 'ACTIVE',
       )
       .reduce(
