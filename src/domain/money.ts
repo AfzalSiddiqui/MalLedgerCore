@@ -5,6 +5,13 @@ const CURRENCY_SCALE: Record<Currency, bigint> = {
   BHD: 1000n,
 };
 
+const CURRENCY_DECIMALS: Record<Currency, number> = {
+  AED: 2,
+  BHD: 3,
+};
+
+const MAJOR_UNITS_FORMAT = /^-?\d+(\.\d+)?$/;
+
 export class Money {
   readonly amount: bigint;
   readonly currency: Currency;
@@ -20,9 +27,16 @@ export class Money {
 
   static fromMajorUnits(value: string, currency: Currency): Money {
     const scale = CURRENCY_SCALE[currency];
+
+    if (!MAJOR_UNITS_FORMAT.test(value)) {
+      throw new Error(
+        `Invalid ${currency} amount "${value}": expected digits with an optional decimal part, e.g. 1200.50`,
+      );
+    }
+
     const [whole, fraction = ''] = value.split('.');
 
-    const requiredDigits = currency === 'AED' ? 2 : 3;
+    const requiredDigits = CURRENCY_DECIMALS[currency];
 
     if (fraction.length > requiredDigits) {
       throw new Error(
@@ -52,6 +66,10 @@ export class Money {
     return new Money(this.amount - other.amount, this.currency);
   }
 
+  isPositive(): boolean {
+    return this.amount > 0n;
+  }
+
   isNegative(): boolean {
     return this.amount < 0n;
   }
@@ -68,7 +86,7 @@ export class Money {
     const whole = absolute / scale;
     const fraction = absolute % scale;
 
-    const digits = this.currency === 'AED' ? 2 : 3;
+    const digits = CURRENCY_DECIMALS[this.currency];
 
     return `${negative ? '-' : ''}${whole}.${fraction
       .toString()

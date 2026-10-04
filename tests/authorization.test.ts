@@ -62,7 +62,8 @@ describe('AuthorizationService', () => {
       'Day1',
     );
 
-    expect(hold.status).toBe('RELEASED');
+    // Declined, not released: nothing was ever reserved.
+    expect(hold.status).toBe('DECLINED');
     expect(service.availableBalance(account, 'Day1').toString()).toBe(
       '250.00',
     );

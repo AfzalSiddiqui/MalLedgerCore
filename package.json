@@ -5,6 +5,7 @@
   "main": "index.js",
   "scripts": {
     "build": "tsc",
+    "replay": "tsc && node dist/src/run.js",
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "eslint ."

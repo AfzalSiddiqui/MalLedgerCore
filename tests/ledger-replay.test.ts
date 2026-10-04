@@ -1,114 +1,17 @@
 import { describe, expect, it } from 'vitest';
-import { Account } from '../src/domain/account.js';
-import { Money } from '../src/domain/money.js';
-import { LedgerEvent } from '../src/replay/events.js';
 import { LedgerReplay } from '../src/replay/ledger-replay.js';
+import {
+  SCENARIO_ACCOUNTS,
+  SCENARIO_EVENTS,
+  SCENARIO_OVERDRAFT_FEES,
+} from '../src/replay/scenario.js';
 
-const accounts = [
-  new Account(
-    'ACC-001',
-    Money.fromMajorUnits('0.00', 'AED'),
-  ),
-  new Account(
-    'ACC-002',
-    Money.fromMajorUnits('0.000', 'BHD'),
-  ),
-];
-
-const events: LedgerEvent[] = [
-  {
-    eventId: 'E1',
-    type: 'CREDIT',
-    day: 'Day1',
-    accountId: 'ACC-001',
-    amount: Money.fromMajorUnits('1200.00', 'AED'),
-    valueDate: 'Day1',
-  },
-  {
-    eventId: 'E2',
-    type: 'DEBIT',
-    day: 'Day1',
-    accountId: 'ACC-001',
-    amount: Money.fromMajorUnits('950.00', 'AED'),
-    valueDate: 'Day1',
-  },
-  {
-    eventId: 'E3',
-    type: 'AUTHORIZATION',
-    day: 'Day2',
-    accountId: 'ACC-001',
-    authorizationId: 'Auth-A',
-    amount: Money.fromMajorUnits('200.00', 'AED'),
-    valueDate: 'Day2',
-  },
-  {
-    eventId: 'E4',
-    type: 'CREDIT',
-    day: 'Day3',
-    accountId: 'ACC-001',
-    amount: Money.fromMajorUnits('400.00', 'AED'),
-    valueDate: 'Day3',
-  },
-  {
-    eventId: 'E5',
-    type: 'SETTLEMENT',
-    day: 'Day4',
-    accountId: 'ACC-001',
-    authorizationId: 'Auth-A',
-    amount: Money.fromMajorUnits('185.00', 'AED'),
-    valueDate: 'Day4',
-  },
-  {
-    eventId: 'E6',
-    type: 'SETTLEMENT',
-    day: 'Day4',
-    accountId: 'ACC-001',
-    authorizationId: 'Auth-Z',
-    amount: Money.fromMajorUnits('180.00', 'AED'),
-    valueDate: 'Day4',
-  },
-  {
-    eventId: 'E7',
-    type: 'DEBIT',
-    day: 'Day5',
-    accountId: 'ACC-001',
-    amount: Money.fromMajorUnits('620.00', 'AED'),
-    valueDate: 'Day2',
-  },
-  {
-    eventId: 'E8',
-    type: 'AUTHORIZATION',
-    day: 'Day5',
-    accountId: 'ACC-001',
-    authorizationId: 'Auth-B',
-    amount: Money.fromMajorUnits('90.00', 'AED'),
-    valueDate: 'Day5',
-  },
-  {
-    eventId: 'E9',
-    type: 'REVERSAL',
-    day: 'Day6',
-    accountId: 'ACC-001',
-    originalEntryId: 'E7',
-    valueDate: 'Day2',
-  },
-  {
-    eventId: 'E10',
-    type: 'CREDIT_INSTALLMENTS',
-    day: 'Day5',
-    accountId: 'ACC-002',
-    amount: Money.fromMajorUnits('10.000', 'BHD'),
-    valueDate: 'Day5',
-    installments: 3,
-  },
-];
+const accounts = SCENARIO_ACCOUNTS;
+const events = SCENARIO_EVENTS;
 
 describe('LedgerReplay', () => {
   const createReplay = () =>
-    new LedgerReplay(accounts, {
-      'ACC-001': Money.fromMajorUnits('25.00', 'AED'),
-      'ACC-002': Money.fromMajorUnits('0.000', 'BHD'),
-    });
+    new LedgerReplay(accounts, SCENARIO_OVERDRAFT_FEES);
 
   it('replays the event stream and produces the expected historical balances', () => {
     const result = createReplay().replay(events);
@@ -139,7 +42,57 @@ describe('LedgerReplay', () => {
         accounts[0],
         'Day4',
       ).toString(),
-    ).toBe('440.00');
+    ).toBe('415.00');
+
+    expect(
+      result.ledger.balanceAt(accounts[0], 'Day5').toString(),
+    ).toBe('390.00');
+
+    expect(
+      result.ledger.balanceAt(accounts[0], 'Day6').toString(),
+    ).toBe('390.93');
+  });
+
+  it('criterion 1: Day2 close at end of Day5, before any fee, is -370.00', () => {
+    const result = createReplay().replay(events);
+
+    // Known at end of Day5 = everything except E9 (Day6) and the interest
+    // credit (Day6 close). "Before any fee" = exclude FEE entries.
+    const day2BeforeFees = result.ledger
+      .entries('ACC-001')
+      .filter(
+        (entry) =>
+          entry.type !== 'FEE' &&
+          entry.type !== 'INTEREST' &&
+          entry.entryId !== 'E9' &&
+          (entry.valueDate === 'Day1' || entry.valueDate === 'Day2'),
+      )
+      .reduce((sum, entry) => sum + entry.amount.amount, 0n);
+
+    expect(day2BeforeFees).toBe(-37000n);
+  });
+
+  it('prints the as-known closing balance each day, before later back-valued events', () => {
+    const result = createReplay().replay(events);
+
+    expect(
+      result.dailyReports.map((report) => report.closingAsKnown['ACC-001']),
+    ).toEqual(['250.00', '250.00', '650.00', '465.00', '-230.00', '390.93']);
+
+    expect(
+      result.dailyReports.map((report) => report.closingAsKnown['ACC-002']),
+    ).toEqual(['0.000', '0.000', '0.000', '0.000', '0.000', '10.008']);
+  });
+
+  it('flags E10 as a late arrival but still posts it with value date Day5', () => {
+    const result = createReplay().replay(events);
+
+    expect(
+      result.errors.some(
+        (error) => error.eventId === 'E10' && error.message.startsWith('WARNING'),
+      ),
+    ).toBe(true);
+    expect(result.ledger.balanceAt(accounts[1], 'Day5').toString()).toBe('10.000');
   });
 
   it('accepts Auth-A settlement', () => {
@@ -168,16 +121,29 @@ describe('LedgerReplay', () => {
     ).toBe(true);
   });
 
-  it('assesses exactly one overdraft fee for the historical Day2 negative balance', () => {
+  // Criterion 2 is REJECTED: E7 causes three fees, not one (REJECTED.md).
+  it('E7 causes three overdraft fees: Day2, Day4 and Day5, all booked at Day5 close', () => {
     const result = createReplay().replay(events);
 
     const fees = result.ledger
       .entries('ACC-001')
       .filter((entry) => entry.type === 'FEE');
 
-    expect(fees).toHaveLength(1);
-    expect(fees[0].amount.toString()).toBe('-25.00');
-    expect(fees[0].valueDate).toBe('Day2');
+    expect(fees.map((fee) => fee.valueDate)).toEqual(['Day2', 'Day4', 'Day5']);
+    expect(fees.every((fee) => fee.amount.toString() === '-25.00')).toBe(true);
+
+    const day5 = result.dailyReports.find((report) => report.day === 'Day5');
+    expect(day5?.feesBookedAtClose).toHaveLength(3);
+  });
+
+  it('without E7 (and E9) no fee is ever charged', () => {
+    const result = createReplay().replay(
+      events.filter((event) => event.eventId !== 'E7' && event.eventId !== 'E9'),
+    );
+
+    expect(
+      result.ledger.entries('ACC-001').filter((entry) => entry.type === 'FEE'),
+    ).toHaveLength(0);
   });
 
   it('rejects Auth-B because the late Day2 debit makes available funds insufficient', () => {
@@ -246,14 +212,16 @@ describe('LedgerReplay', () => {
 
     expect(
       result.capitalizedInterest['ACC-001'],
-    ).toBe('0.98');
+    ).toBe('0.93');
+
+    expect(result.capitalizedInterest['ACC-002']).toBe('0.008');
 
     const interestEntry = result.ledger
       .entries('ACC-001')
       .find((entry) => entry.type === 'INTEREST');
 
     expect(interestEntry?.valueDate).toBe('Day6');
-    expect(interestEntry?.amount.toString()).toBe('0.98');
+    expect(interestEntry?.amount.toString()).toBe('0.93');
   });
 
   it('produces daily reports with balances, fees, authorization states and errors', () => {
@@ -267,6 +235,9 @@ describe('LedgerReplay', () => {
     expect(day2?.fees).toEqual([
       'OVERDRAFT: 25.00',
     ]);
+
+    // Authorization states are as they stood at each close, not final.
+    expect(day2?.authorizationStates).toEqual(['Auth-A: ACTIVE']);
 
     const day4 = result.dailyReports.find(
       (report) => report.day === 'Day4',
@@ -283,9 +254,8 @@ describe('LedgerReplay', () => {
     ).toBe(true);
   });
 
-    it.fails('rejects equal BHD installments because they do not conserve value', () => {
-      // INTENTIONAL FAILURE: 3 × BHD 3.334 = BHD 10.002, not BHD 10.000.
-      const total = 3334n * 3n;
-      expect(total).toBe(10000n);
-    });
+  // Criterion 7 is REJECTED: 3 x BHD 3.334 = 10.002, not 10.000.
+  it('three instalments of BHD 3.334 would not conserve value', () => {
+    expect(3334n * 3n).not.toBe(10000n);
+  });
 });

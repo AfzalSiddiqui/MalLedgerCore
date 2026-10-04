@@ -1,7 +1,16 @@
 
 import { Money } from './money.js';
 
-export type AuthorizationHoldStatus = 'ACTIVE' | 'SETTLED' | 'RELEASED';
+/**
+ * DECLINED: the request was refused and never reserved funds.
+ * RELEASED: funds were reserved and later given back.
+ * The two are kept distinct so reports and audits do not conflate them.
+ */
+export type AuthorizationHoldStatus =
+  | 'ACTIVE'
+  | 'SETTLED'
+  | 'RELEASED'
+  | 'DECLINED';
 
 export interface AuthorizationHold {
   readonly authorizationId: string;
