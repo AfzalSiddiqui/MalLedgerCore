@@ -182,7 +182,7 @@ describe('Correctness fixes', () => {
   });
 
   // 6 is a documented policy decision (AMBIGUITIES.md), pinned here.
-  it('assesses only value dates touched by that day’s debits', () => {
+  it('re-checks every value date at each close, so a back-valued debit is charged', () => {
     const account = new Account('ACC-001', aed('0.00'));
 
     const result = new LedgerReplay([account], {
@@ -200,9 +200,11 @@ describe('Correctness fixes', () => {
       .filter((entry) => entry.type === 'FEE')
       .map((entry) => entry.valueDate);
 
-    // Day2 is now also negative (-30.00) but no debit touched Day2 on Day3.
-    expect(feeDates).toEqual([]);
-    expect(result.ledger.balanceAt(account, 'Day2').toString()).toBe('-30.00');
+    // D2 (posted Day3, value Day1) leaves Day1 at 50.00 but turns Day2 into
+    // -30.00. Day3's close re-checks Day1..Day3 and charges Day2 (back-valued)
+    // and Day3; each later close charges its own day while it stays negative.
+    expect(feeDates).toEqual(['Day2', 'Day3', 'Day4', 'Day5', 'Day6']);
+    expect(result.ledger.balanceAt(account, 'Day1').toString()).toBe('50.00');
   });
 
   // 7
@@ -224,8 +226,9 @@ describe('Correctness fixes', () => {
       .entries('ACC-001')
       .filter((entry) => entry.type === 'FEE');
 
-    expect(fees).toHaveLength(1);
-    expect(fees[0].valueDate).toBe('Day3');
+    // Day3 goes negative (-60.00) and stays negative to the end of the
+    // window, so every close from Day3 to Day6 charges one fee.
+    expect(fees.map((fee) => fee.valueDate)).toEqual(['Day3', 'Day4', 'Day5', 'Day6']);
   });
 
   // 8

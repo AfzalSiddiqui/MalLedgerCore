@@ -8,8 +8,7 @@ import { Money } from '../domain/money.js';
 import { ReversalService } from '../domain/reversal-service.js';
 import { SettlementService } from '../domain/settlement-service.js';
 import { SettlementRejectionReason } from '../domain/settlement.js';
-import { compareValueDates, isOnOrBefore } from '../domain/value-date.js';
-import { LedgerEntry } from '../domain/ledger-entry.js';
+import { isOnOrBefore } from '../domain/value-date.js';
 import { LedgerEvent } from './events.js';
 
 export const DAYS = [
@@ -29,10 +28,23 @@ export interface ReplayError {
 
 export interface DailyReport {
   readonly day: string;
+  /** Final value-dated closing balance: every entry with valueDate <= day, after the whole stream. */
   readonly balances: Readonly<Record<string, string>>;
+  /** Closing balance as it stood when this day was closed (before later back-valued events). */
+  readonly closingAsKnown: Readonly<Record<string, string>>;
+  /** Fees whose value date is this day. */
   readonly fees: readonly string[];
+  /** Fees booked by this day's end-of-day run, with the value date each one is for. */
+  readonly feesBookedAtClose: readonly string[];
+  /** Authorization states as they stood at this day's close. */
   readonly authorizationStates: readonly string[];
   readonly errors: readonly string[];
+}
+
+interface DaySnapshot {
+  readonly closingAsKnown: Record<string, string>;
+  readonly feesBookedAtClose: string[];
+  readonly authorizationStates: string[];
 }
 
 export interface ReplayResult {
@@ -50,7 +62,9 @@ export class LedgerReplay {
   private readonly reversalService: ReversalService;
   private readonly feeServices: Map<string, FeeService>;
   private readonly interestServices: Map<string, InterestService>;
-  private readonly pendingOverdraftDates = new Map<string, Set<string>>();
+  private readonly snapshots = new Map<string, DaySnapshot>();
+  private readonly interestAccruals: InterestAccrual[] = [];
+  private readonly capitalizedInterest: Record<string, string> = {};
   private replayed = false;
 
   constructor(
@@ -100,14 +114,38 @@ export class LedgerReplay {
 
     const errors: ReplayError[] = [];
     const processedEventIds = new Set<string>();
-    let currentDay: string | undefined;
+
+    // The processing clock. It only moves forward, and every day it leaves
+    // behind is closed exactly once, in order, including days with no events.
+    let openDayIndex = 0;
 
     for (const event of events) {
-      if (currentDay !== undefined && event.day !== currentDay) {
-        this.closeDay(currentDay, errors);
+      const eventDayIndex = DAYS.indexOf(event.day as (typeof DAYS)[number]);
+
+      if (eventDayIndex === -1) {
+        errors.push({
+          eventId: event.eventId,
+          day: DAYS[openDayIndex],
+          message: `Event day ${event.day} is outside the replay window; ignored`,
+        });
+        continue;
       }
 
-      currentDay = event.day;
+      while (openDayIndex < eventDayIndex) {
+        this.closeDay(DAYS[openDayIndex], errors);
+        openDayIndex += 1;
+      }
+
+      if (eventDayIndex < openDayIndex) {
+        // Late arrival (E10: labelled Day5, arrives after E9 on Day6). The
+        // stream order is authoritative, so it is processed now, during the
+        // open day, and keeps its own value date. Day5 is not re-closed.
+        errors.push({
+          eventId: event.eventId,
+          day: DAYS[openDayIndex],
+          message: `WARNING (accepted): ${event.eventId} is labelled ${event.day} but arrived after ${event.day} was closed; processed on ${DAYS[openDayIndex]} with value date ${event.valueDate}`,
+        });
+      }
 
       // Idempotency: a redelivered event is reported and has no effect.
       if (processedEventIds.has(event.eventId)) {
@@ -144,37 +182,18 @@ export class LedgerReplay {
       }
     }
 
-    if (currentDay !== undefined) {
-      this.closeDay(currentDay, errors);
-    }
-
-    const interestAccruals: InterestAccrual[] = [];
-    const capitalizedInterest: Record<string, string> = {};
-
-    for (const account of this.accounts) {
-      const interestService = this.interestServices.get(account.id)!;
-
-      const accruals = interestService.accrueForDays(
-        account,
-        DAYS,
-      );
-
-      interestAccruals.push(...accruals);
-
-      const total = interestService.capitalize(
-        account,
-        'Day6',
-        DAYS,
-      );
-
-      capitalizedInterest[account.id] = total.toString();
+    // Close the open day and any remaining days of the window. Interest is
+    // capitalized inside the last day's close.
+    while (openDayIndex < DAYS.length) {
+      this.closeDay(DAYS[openDayIndex], errors);
+      openDayIndex += 1;
     }
 
     return {
       ledger: this.ledger,
       errors,
-      interestAccruals,
-      capitalizedInterest,
+      interestAccruals: this.interestAccruals,
+      capitalizedInterest: this.capitalizedInterest,
       dailyReports: this.buildDailyReports(errors),
     };
   }
@@ -198,11 +217,9 @@ export class LedgerReplay {
           event.amount,
         );
 
+        // No balance check: the brief applies the available-balance test to
+        // authorizations only. The fee is decided at end of day.
         this.appendSignedEntry(account, event, debitAmount);
-
-        // The fee is decided on the closing balance at end of day, not on
-        // the intraday balance straight after this debit.
-        this.markForOverdraftAssessment(account, event.valueDate);
 
         return;
       }
@@ -248,9 +265,6 @@ export class LedgerReplay {
           return;
         }
 
-        // A settlement is a ledger debit too, so it can cause an overdraft.
-        this.markForOverdraftAssessment(account, event.valueDate);
-
         return;
       }
 
@@ -279,36 +293,39 @@ export class LedgerReplay {
     }
   }
 
-  private markForOverdraftAssessment(
-    account: Account,
-    valueDate: string,
-  ): void {
-    const dates =
-      this.pendingOverdraftDates.get(account.id) ?? new Set<string>();
-
-    dates.add(valueDate);
-
-    this.pendingOverdraftDates.set(account.id, dates);
-  }
-
   /**
-   * End-of-day processing for one arrival day: every value date touched by a
-   * debit or settlement that day is assessed once, on its closing balance as
-   * it stands after all of the day's events.
+   * End-of-day processing for one day.
+   *
+   * Overdraft fees: every value date from Day1 up to and including the day
+   * being closed is checked, in ascending order, and any date whose closing
+   * balance is negative and has no fee yet gets one. Checking every date (not
+   * only dates touched by today's debits) is what the rule says: a fee is due
+   * for each day whose closing balance is negative. It also catches back-valued
+   * entries: E7 (posted Day5, value Day2) makes Day2, Day4 and Day5 negative,
+   * so Day5's close books three fees. Ascending order matters because a fee
+   * booked for day d is part of day d+1's closing balance. FeeService keys
+   * fees by (account, date), so re-checking a date never charges it twice.
+   *
+   * Then, on the last day, interest is accrued from the final value-dated
+   * history and capitalized. Finally the day's state is snapshotted for the
+   * report, because later back-valued events change the history.
    */
   private closeDay(day: string, errors: ReplayError[]): void {
+    const closingIndex = DAYS.indexOf(day as (typeof DAYS)[number]);
+    const feesBookedAtClose: string[] = [];
+
     for (const account of this.accounts) {
-      const dates = this.pendingOverdraftDates.get(account.id);
-
-      if (!dates) {
-        continue;
-      }
-
       const feeService = this.feeServices.get(account.id)!;
 
-      for (const valueDate of [...dates].sort(compareValueDates)) {
+      for (const valueDate of DAYS.slice(0, closingIndex + 1)) {
         try {
-          feeService.assessOverdraft(account, valueDate);
+          const fee = feeService.assessOverdraft(account, valueDate);
+
+          if (fee) {
+            feesBookedAtClose.push(
+              `${account.id} ${fee.type} ${fee.amount.toString()} for ${valueDate}${valueDate === day ? '' : ' (back-valued)'}`,
+            );
+          }
         } catch (error) {
           errors.push({
             eventId: `EOD-${account.id}-${valueDate}`,
@@ -320,7 +337,40 @@ export class LedgerReplay {
       }
     }
 
-    this.pendingOverdraftDates.clear();
+    if (closingIndex === DAYS.length - 1) {
+      for (const account of this.accounts) {
+        const interestService = this.interestServices.get(account.id)!;
+
+        this.interestAccruals.push(
+          ...interestService.accrueForDays(account, DAYS),
+        );
+
+        this.capitalizedInterest[account.id] = interestService
+          .capitalize(account, day, DAYS)
+          .toString();
+      }
+    }
+
+    const closingAsKnown: Record<string, string> = {};
+    const authorizationStates: string[] = [];
+
+    for (const account of this.accounts) {
+      closingAsKnown[account.id] = this.ledger
+        .balanceAt(account, day)
+        .toString();
+
+      for (const hold of this.authorizationService.holdsFor(account.id)) {
+        if (isOnOrBefore(hold.valueDate, day)) {
+          authorizationStates.push(`${hold.authorizationId}: ${hold.status}`);
+        }
+      }
+    }
+
+    this.snapshots.set(day, {
+      closingAsKnown,
+      feesBookedAtClose,
+      authorizationStates,
+    });
   }
 
   private appendSignedEntry(
@@ -366,7 +416,7 @@ export class LedgerReplay {
     return DAYS.map((day) => {
       const balances: Record<string, string> = {};
       const fees: string[] = [];
-      const authorizationStates: string[] = [];
+      const snapshot = this.snapshots.get(day);
 
       for (const account of this.accounts) {
         balances[account.id] = this.ledger
@@ -382,23 +432,15 @@ export class LedgerReplay {
             );
           }
         }
-
-        const holds = this.authorizationService
-          .holdsFor(account.id)
-          .filter((hold) => isOnOrBefore(hold.valueDate, day));
-
-        for (const hold of holds) {
-          authorizationStates.push(
-            `${hold.authorizationId}: ${hold.status}`,
-          );
-        }
       }
 
       return {
         day,
         balances,
+        closingAsKnown: snapshot?.closingAsKnown ?? {},
         fees,
-        authorizationStates,
+        feesBookedAtClose: snapshot?.feesBookedAtClose ?? [],
+        authorizationStates: snapshot?.authorizationStates ?? [],
         errors: errors
           .filter((error) => error.day === day)
           .map(

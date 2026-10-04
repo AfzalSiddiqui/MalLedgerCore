@@ -66,3 +66,16 @@
 - BHD 10.000 is split as 3.334 + 3.333 + 3.333 to conserve the exact amount.
 - Rounded daily interest accruals are summed exactly before capitalization.
 - Fees remain after later reversals because the ledger is append-only.
+
+## 2026-10-04 (correctness review)
+
+### 18:09–18:15 +0400
+- AI-assisted review (Claude): checked the replay against independently derived figures and found five problems.
+  - Overdraft fees were only assessed for value dates touched by that day's debits, so E7 produced 1 fee instead of 3. Day5 was missed even though Day5 was the day being closed and closed negative.
+  - A late event (E10) made the replay close Day6, then close Day5 again.
+  - The daily report showed final authorization states on every day (Auth-A SETTLED on Day2).
+  - There was no runnable replay script.
+  - The only "failing" test used `it.fails`, so it passed.
+- Fixed: every value date up to the closing day is re-checked at each close; the clock only moves forward, with a late-arrival warning; authorization states and as-known balances are snapshotted at each close; added `npm run replay`; added one real failing test (`tests/known-gap.test.ts`).
+- Updated the tests to the corrected figures: 3 fees (Day2, Day4, Day5), interest 0.93 (was 0.98), Day4 final 415.00 (was 440.00).
+- Updated README, AMBIGUITIES, REJECTED and NUMBERS to match.
