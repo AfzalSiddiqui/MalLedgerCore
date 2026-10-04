@@ -52,6 +52,21 @@
 ### 12:18:56 +0400
 - Documented ledger decisions, numbers, ambiguities, rejected criteria and assessment trade-offs.
 
+### 12:27 +0400
+- Replaced the worklog's placeholder times with real commit timestamps.
+
+### 12:28 +0400
+- Documented the rejected "three equal BHD instalments" criterion in REJECTED.md.
+
+### ~16:00–17:44 +0400
+- Correctness fixes, made with an AI tool and committed as ae0434c.
+  - Negative or zero settlement amounts rejected, with named rejection reasons.
+  - Duplicate ledger entry IDs rejected; instalments posted all-or-nothing.
+  - Value dates compared as day numbers (value-date.ts), so Day10 sorts after Day2.
+  - Overdraft fee decided on the closing balance, not intraday; settlements can trigger it.
+  - DECLINED kept separate from RELEASED; replay made one-shot; duplicate events ignored.
+  - 17 tests in tests/correctness-fixes.test.ts.
+
 ## Design decisions, in short
 
 - Ledger entries are append-only.
@@ -100,3 +115,10 @@
 - Added `tests/authorization-lifecycle.test.ts` (5 tests). The suite is now 63 tests with exactly 1 intended failure. Replay output is unchanged.
 - Added the reasoning for criteria 1, 3, 4 and 5 to REJECTED.md, and updated AMBIGUITIES, README and ARCHITECTURE.
 - Measured how authorization cost grows with volume, for the Part 2 document. With 100 accounts: 1,000 authorize+settle pairs took 31 ms, 10,000 took 1.4 s and 30,000 took 12.5 s. Per-pair cost grows linearly with history, so total cost grows quadratically.
+
+## 2026-10-04 (verification-command cleanup)
+
+### 18:49:01 +0400
+- Split the passing verification suite (`npm test`) from the intentionally failing design-gap demonstration (`npm run test:known-gap`).
+- Added `npm run test:all` for reviewers who want to observe the complete suite, including the required failure.
+- Kept the design-gap test as a plain failing test; it is not skipped, inverted, or hidden.
