@@ -6,7 +6,9 @@
   "scripts": {
     "build": "tsc",
     "replay": "tsc && node dist/src/run.js",
-    "test": "vitest run",
+    "test": "vitest run --exclude tests/known-gap.test.ts",
+    "test:known-gap": "vitest run tests/known-gap.test.ts",
+    "test:all": "vitest run",
     "test:watch": "vitest",
     "lint": "eslint ."
   },

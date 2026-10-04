@@ -61,12 +61,13 @@ You need Node 22 (see `.nvmrc`).
 ```bash
 npm install
 npm run replay
-npm test
+npm test               # passing verification suite
+npm run test:known-gap # intentional design-gap failure
 ```
 
-`npm run replay` compiles the project, replays E1 to E10 and prints a report for each day. `npm test` runs the test suite.
+`npm run replay` compiles the project, replays E1 to E10 and prints a report for each day. `npm test` is the passing verification suite. `npm run test:all` runs every test, including the intentional design-gap test.
 
-**One test fails on purpose.** That's `tests/known-gap.test.ts`. The brief asked for a failing test against my own design, and this one shows a real weakness: the customer keeps paying fees for a debit the bank reversed. The comments in the test explain it. Everything else should pass.
+**One test fails on purpose.** `npm run test:known-gap` runs `tests/known-gap.test.ts` and exits non-zero by design. The brief asked for a failing test against my own design, and this one shows a real weakness: the customer keeps paying fees for a debit the bank reversed. The comments in the test explain it. Keeping this separate means ordinary CI can use `npm test` as a reliable passing verification command without hiding the known gap.
 
 ## Reading the replay output
 
