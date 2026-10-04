@@ -282,4 +282,10 @@ describe('LedgerReplay', () => {
       ),
     ).toBe(true);
   });
+
+    it.fails('rejects equal BHD installments because they do not conserve value', () => {
+      // INTENTIONAL FAILURE: 3 × BHD 3.334 = BHD 10.002, not BHD 10.000.
+      const total = 3334n * 3n;
+      expect(total).toBe(10000n);
+    });
 });
