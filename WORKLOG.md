@@ -65,7 +65,7 @@
 - Exact monetary conservation takes priority over equal rounded installments.
 - BHD 10.000 is split as 3.334 + 3.333 + 3.333 to conserve the exact amount.
 - Rounded daily interest accruals are summed exactly before capitalization.
-- Fees remain after later reversals because the ledger is append-only.
+- Fees remain after later reversals because the brief defines no refund rule (a refund would be new appended entries).
 
 ## 2026-10-04 (correctness review)
 
@@ -79,3 +79,6 @@
 - Fixed: every value date up to the closing day is re-checked at each close; the clock only moves forward, with a late-arrival warning; authorization states and as-known balances are snapshotted at each close; added `npm run replay`; added one real failing test (`tests/known-gap.test.ts`).
 - Updated the tests to the corrected figures: 3 fees (Day2, Day4, Day5), interest 0.93 (was 0.98), Day4 final 415.00 (was 440.00).
 - Updated README, AMBIGUITIES, REJECTED and NUMBERS to match.
+
+### 18:20–18:25 +0400
+- AI-assisted (Claude) documentation check after merging the fixes. Fixed an unclosed code block in README that made the rest of the README render as code. Corrected three places that gave append-only as the reason fees are not refunded; the actual reason is that the brief has no refund rule. Aligned the Auth-Z wording in REJECTED.md with AMBIGUITIES.md. Added ARCHITECTURE.md (design and trade-offs).

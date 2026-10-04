@@ -36,7 +36,7 @@ Resolution: ACC-002 has no fee configured, so no fee is booked. Charging 25.000 
 
 The requirements suggest E9 could return balances and fees to the pre-E7 state.
 
-Resolution: rejected because the ledger is append-only. E9 compensates E7 but does not remove an already-booked fee.
+Resolution: E9 compensates E7 with a new entry, but the three fees stay booked. The reason is that the brief has no fee-refund rule and refunding is a business decision. Append-only is not the reason: a refund would be new +25.00 entries, not deletions. The cost is shown by `tests/known-gap.test.ts`.
 
 ## Closing balance vs pre-fee balance
 

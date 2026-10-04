@@ -37,7 +37,7 @@ The criterion could also be read as "Day2 is charged once, not twice". The imple
 
 Rejected.
 
-A reversal cannot remove the already-assessed fee because the ledger is append-only.
+The fees are not refunded because the brief has no refund rule, not because of append-only. A refund would be appended as new entries.
 
 E9 compensates E7 with a new entry and leaves both E7 and the three fees intact.
 
@@ -91,9 +91,9 @@ Rejected because it violates append-only auditability.
 
 Rejected because a hold reserves available balance without posting a ledger transaction.
 
-## Allowing unknown settlements
+## Posting unknown settlements to the customer account
 
-Rejected because funds must not leave the account without a valid authorization.
+Rejected for this core: Auth-Z is refused, and nothing is posted to ACC-001. A production system would post it to a suspense account instead, because clearing records without an authorization (force posts, offline transactions) are normal and the money has usually already left the bank. See AMBIGUITIES.md.
 
 ## Database
 

@@ -42,6 +42,8 @@ Ledger Replay
      |
      v
 Daily Report
+```
+
 The implementation intentionally keeps the domain small. The assessment is focused on ledger correctness and reasoning rather than infrastructure.
 
 ## Money representation
@@ -109,4 +111,4 @@ The final block lists each day's interest accrual (base balance and rounded accr
 | Errors | E6 (Auth-Z unknown), E8 (Auth-B declined) | E10 late-arrival warning |
 | Interest capitalized | 0.93 | 0.008 |
 
-See NUMBERS.md for how each number is derived.
+See NUMBERS.md for how each number is derived, and ARCHITECTURE.md for the design and its trade-offs.
